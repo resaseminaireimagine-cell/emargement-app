@@ -2,13 +2,78 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime
 import re
+import io
+from pathlib import Path
 
-st.set_page_config(page_title="Émargement digital", layout="wide")
-st.title("Émargement digital — V2")
+# =========================
+# CONFIG / BRANDING
+# =========================
+APP_TITLE = "Outil d’émargement — Institut Imagine"
+st.set_page_config(page_title=APP_TITLE, layout="wide")
 
-# -------------------------
-# Helpers
-# -------------------------
+# Couleurs (ajuste si besoin)
+PRIMARY = "#C4007A"   # rose Imagine (proche du logo)
+BG = "#F6F7FB"
+TEXT = "#111827"
+MUTED = "#6B7280"
+
+# Logo : on essaie plusieurs noms (au cas où)
+LOGO_CANDIDATES = [
+    "logo_rose.png",
+    "LOGO_ROSE.png",
+    "LOGO ROSE.png",
+    "logo.png",
+    "logo-imagine.png",
+]
+
+def find_logo_path() -> str | None:
+    for name in LOGO_CANDIDATES:
+        p = Path(name)
+        if p.exists():
+            return str(p)
+    return None
+
+# CSS pour un rendu plus “pro”
+st.markdown(
+    f"""
+<style>
+.stApp {{ background: {BG}; }}
+.block-container {{ padding-top: 1.5rem; max-width: 1250px; }}
+
+h1, h2, h3, h4 {{ color: {TEXT}; }}
+small, .stCaption, p {{ color: {MUTED}; }}
+
+.stButton > button {{
+  background: {PRIMARY};
+  color: white;
+  border: 0;
+  border-radius: 12px;
+  padding: 0.55rem 0.9rem;
+  font-weight: 650;
+}}
+.stButton > button:hover {{
+  filter: brightness(0.95);
+}}
+
+.stTextInput input {{
+  border-radius: 12px;
+}}
+
+[data-testid="stHorizontalBlock"] {{
+  background: white;
+  border-radius: 14px;
+  padding: 0.35rem 0.6rem;
+  margin-bottom: 0.35rem;
+  box-shadow: 0 1px 10px rgba(0,0,0,0.06);
+}}
+</style>
+""",
+    unsafe_allow_html=True
+)
+
+# =========================
+# HELPERS DATA
+# =========================
 def now_str() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -17,7 +82,6 @@ def normalize(s: str) -> str:
     s = re.sub(r"\s+", " ", s)
     return s
 
-# Colonnes "standard" (dans l'app) et leurs alias possibles dans l'Excel
 ALIASES = {
     "first_name": ["first_name", "firstname", "prenom", "prénom", "given name", "given_name"],
     "last_name":  ["last_name", "lastname", "nom", "surname", "family name", "family_name"],
@@ -29,7 +93,6 @@ ALIASES = {
 STANDARD_ORDER = ["first_name", "last_name", "email", "company", "function"]
 
 def standardize_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Renomme automatiquement les colonnes d'entrée vers des noms standards."""
     df = df.copy()
     original_cols = list(df.columns)
     norm_cols = {c: normalize(c) for c in original_cols}
@@ -47,7 +110,6 @@ def standardize_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df.rename(columns=mapping)
 
 def ensure_internal_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Ajoute les colonnes internes nécessaires à l'émargement."""
     df = df.copy()
     if "present" not in df.columns:
         df["present"] = False
@@ -58,7 +120,6 @@ def ensure_internal_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def make_base_id(row: pd.Series) -> str:
-    """Base d'identité (peut être non unique si doublons)."""
     email = str(row.get("email", "")).strip().lower()
     if email and email != "nan":
         return f"email:{email}"
@@ -77,41 +138,50 @@ def build_search_text(row: pd.Series, cols: list[str]) -> str:
     return " ".join(parts).lower()
 
 def load_excel(uploaded_file) -> pd.DataFrame:
-    """Charge l'Excel, standardise, sécurise, crée un ID unique."""
     df = pd.read_excel(uploaded_file, engine="openpyxl")
     df = standardize_columns(df)
     df = ensure_internal_columns(df)
-
-    # Nettoyage léger
     df = df.fillna("")
 
     # ID unique garanti (évite StreamlitDuplicateElementKey)
-    # -> base_id + index de ligne (stable dans le fichier importé)
     df["__base_id"] = df.apply(make_base_id, axis=1)
     df["__id"] = df["__base_id"] + "|row:" + df.index.astype(str)
     df = df.drop(columns=["__base_id"], errors="ignore")
 
     return df
 
-# -------------------------
-# Sidebar
-# -------------------------
+# =========================
+# HEADER (LOGO + TITRE)
+# =========================
+logo_path = find_logo_path()
+
+h1, h2 = st.columns([1, 5], vertical_alignment="center")
+with h1:
+    if logo_path:
+        st.image(logo_path, use_container_width=True)
+with h2:
+    st.markdown(f"## {APP_TITLE}")
+    st.caption("Importez votre liste, recherchez un participant, émargez, puis exportez la feuille d’émargement.")
+
+st.divider()
+
+# =========================
+# SIDEBAR
+# =========================
 with st.sidebar:
     st.header("Réglages")
-    staff_name = st.text_input(
-        "Nom de l'agent (optionnel)",
-        placeholder="Ex: Ambroise"
-    ).strip()
+    staff_name = st.text_input("Nom de l'agent (optionnel)", placeholder="Ex: Ambroise").strip()
+    st.caption("Ce nom sera enregistré dans la colonne checkin_by.")
+    st.markdown("---")
+    st.caption("Astuce Excel : l’export CSV utilise **;** (compatibilité Excel FR).")
 
-    st.caption("Le nom de l’agent sera enregistré dans la colonne checkin_by.")
-
-# -------------------------
-# Upload
-# -------------------------
+# =========================
+# UPLOAD
+# =========================
 uploaded = st.file_uploader("Importer un fichier Excel (.xlsx)", type=["xlsx"])
 
 if uploaded is None:
-    st.info("➡️ Importe un fichier Excel pour démarrer.")
+    st.info("➡️ Importez un fichier Excel pour commencer.")
     st.stop()
 
 # Charger une seule fois par fichier (évite relecture à chaque clic)
@@ -121,71 +191,75 @@ if "df" not in st.session_state or st.session_state.get("filename") != uploaded.
 
 df = st.session_state.df
 
-# -------------------------
-# KPIs
-# -------------------------
+# =========================
+# KPIs + CONTROLS
+# =========================
 total = len(df)
 present_count = int(df["present"].sum())
-c1, c2, c3 = st.columns(3)
-c1.metric("Participants", total)
-c2.metric("Présents", present_count)
-c3.metric("Restants", total - present_count)
-st.divider()
 
-# -------------------------
-# Recherche / filtres
-# -------------------------
-left, right = st.columns([3, 1])
-with left:
+k1, k2, k3, k4 = st.columns([1, 1, 1, 2], vertical_alignment="center")
+k1.metric("Participants", total)
+k2.metric("Présents", present_count)
+k3.metric("Restants", total - present_count)
+
+with k4:
     query = st.text_input("Recherche", placeholder="Nom, prénom, email, société…").strip().lower()
-with right:
-    only_not_present = st.checkbox("Non émargés", value=False)
 
-# Colonnes à afficher (si elles existent)
+filters = st.columns([1, 1, 2], vertical_alignment="center")
+with filters[0]:
+    only_not_present = st.checkbox("Non émargés", value=True)
+with filters[1]:
+    show_present_only = st.checkbox("Présents uniquement", value=False)
+with filters[2]:
+    st.caption("Affichage optimisé : 1 ligne = 1 participant")
+
+# =========================
+# FILTER / SORT
+# =========================
 display_cols = [c for c in STANDARD_ORDER if c in df.columns]
-# fallback si Excel ne match pas nos alias
 if not display_cols:
     display_cols = [c for c in df.columns if c not in ["present", "checkin_time", "checkin_by", "__id"]][:4]
 
 search_cols = list(dict.fromkeys(display_cols + [c for c in ["email", "company", "function"] if c in df.columns]))
 
-# Filtrage
 view = df.copy()
+
 if query:
     mask = view.apply(lambda r: query in build_search_text(r, search_cols), axis=1)
     view = view[mask].copy()
 
-if only_not_present:
+if show_present_only:
+    view = view[view["present"] == True].copy()
+elif only_not_present:
     view = view[view["present"] == False].copy()
 
-# Tri (si possible)
+# Tri stable
 if "last_name" in view.columns and "first_name" in view.columns:
     view = view.sort_values(by=["last_name", "first_name"], kind="stable")
 elif "last_name" in view.columns:
     view = view.sort_values(by=["last_name"], kind="stable")
 
-# Limite affichage (évite lag si gros fichier)
-MAX_ROWS = 400
+MAX_ROWS = 500
 if len(view) > MAX_ROWS:
-    st.warning(f"{len(view)} résultats. Affichage limité à {MAX_ROWS}. Affine la recherche.")
+    st.warning(f"{len(view)} résultats. Affichage limité à {MAX_ROWS}. Affinez la recherche.")
     view = view.head(MAX_ROWS)
 
-# -------------------------
-# Liste : 1 participant = 1 ligne
-# -------------------------
+st.divider()
+
+# =========================
+# LIST (1 PARTICIPANT = 1 LINE)
+# =========================
 st.subheader("Liste des participants")
 
-# En-tête
-h = st.columns([2, 2, 3, 3, 3, 2, 2])
-h[0].markdown("**Prénom**")
-h[1].markdown("**Nom**")
-h[2].markdown("**Email**")
-h[3].markdown("**Société**")
-h[4].markdown("**Fonction**")
-h[5].markdown("**Statut**")
-h[6].markdown("**Action**")
+header = st.columns([2, 2, 3, 3, 3, 2, 2])
+header[0].markdown("**Prénom**")
+header[1].markdown("**Nom**")
+header[2].markdown("**Email**")
+header[3].markdown("**Société**")
+header[4].markdown("**Fonction**")
+header[5].markdown("**Statut**")
+header[6].markdown("**Action**")
 
-# Lignes
 for _, row in view.iterrows():
     rid = row["__id"]
 
@@ -228,19 +302,66 @@ for _, row in view.iterrows():
 
 st.divider()
 
-# -------------------------
-# Export
-# -------------------------
-st.subheader("Export")
+# =========================
+# LAST CHECK-INS
+# =========================
+st.subheader("Derniers émargés")
+last_df = df[df["present"] == True].copy()
+if len(last_df):
+    # tri par datetime texte (format YYYY-MM-DD HH:MM:SS => tri lexical OK)
+    last_df = last_df.sort_values(by=["checkin_time"], ascending=False, kind="stable").head(8)
+    show_cols = [c for c in ["first_name", "last_name", "company", "checkin_time", "checkin_by"] if c in last_df.columns]
+    st.dataframe(last_df.drop(columns=["__id"], errors="ignore")[show_cols], use_container_width=True, hide_index=True)
+else:
+    st.caption("Aucun émargement pour l’instant.")
+
+st.divider()
+
+# =========================
+# EXPORTS (CSV ; + XLSX)
+# =========================
+st.subheader("Exports")
 
 export_df = df.drop(columns=["__id"], errors="ignore").copy()
 
-st.download_button(
-    "Télécharger le CSV d’émargement",
-    export_df.to_csv(index=False).encode("utf-8"),
-    file_name="emargement_export.csv",
-    mime="text/csv",
-)
+ex1, ex2, ex3 = st.columns([1, 1, 1], vertical_alignment="center")
 
-with st.expander("Voir uniquement les présents"):
-    st.dataframe(export_df[export_df["present"] == True], use_container_width=True)
+# CSV compat Excel FR
+with ex1:
+    csv_bytes = export_df.to_csv(index=False, sep=";", encoding="utf-8-sig").encode("utf-8-sig")
+    st.download_button(
+        "⬇️ CSV (Excel FR)",
+        data=csv_bytes,
+        file_name="emargement_export.csv",
+        mime="text/csv",
+        use_container_width=True
+    )
+
+# CSV présents uniquement
+with ex2:
+    present_only = export_df[export_df["present"] == True].copy()
+    csv_p_bytes = present_only.to_csv(index=False, sep=";", encoding="utf-8-sig").encode("utf-8-sig")
+    st.download_button(
+        "⬇️ CSV (présents)",
+        data=csv_p_bytes,
+        file_name="emargement_presents.csv",
+        mime="text/csv",
+        use_container_width=True
+    )
+
+# Excel (le plus clean)
+with ex3:
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        export_df.to_excel(writer, index=False, sheet_name="Emargement")
+        present_only.to_excel(writer, index=False, sheet_name="Presents")
+    st.download_button(
+        "⬇️ Excel (.xlsx)",
+        data=buffer.getvalue(),
+        file_name="emargement_export.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True
+    )
+
+with st.expander("Aperçu : présents"):
+    st.dataframe(present_only, use_container_width=True, hide_index=True)
