@@ -43,9 +43,10 @@ st.markdown(
 h1, h2, h3, h4 {{ color: {TEXT}; }}
 small, .stCaption, p {{ color: {MUTED}; }}
 
+/* Boutons : texte blanc forcé */
 .stButton > button {{
   background: {PRIMARY};
-  color: white;
+  color: white !important;
   border: 0;
   border-radius: 12px;
   padding: 0.55rem 0.9rem;
@@ -158,7 +159,8 @@ logo_path = find_logo_path()
 h1, h2 = st.columns([1, 5], vertical_alignment="center")
 with h1:
     if logo_path:
-        st.image(logo_path, use_container_width=True)
+        # LOGO réduit (au lieu de prendre toute la colonne)
+        st.image(logo_path, width=140)
 with h2:
     st.markdown(f"## {APP_TITLE}")
     st.caption("Importez votre liste, recherchez un participant, émargez, puis exportez la feuille d’émargement.")
@@ -280,7 +282,8 @@ for _, row in view.iterrows():
     cols[5].write("✅ Présent" if is_present else "⬜ À émarger")
 
     if not is_present:
-        if cols[6].button("Émarger", key=f"em_{rid}", use_container_width=True):
+        # Émarger = rose (primary), Annuler = gris (default)
+        if cols[6].button("Émarger", key=f"em_{rid}", use_container_width=True, type="primary"):
             idx = df.index[df["__id"] == rid]
             if len(idx):
                 i = idx[0]
@@ -326,7 +329,7 @@ export_df = df.drop(columns=["__id"], errors="ignore").copy()
 
 ex1, ex2, ex3 = st.columns([1, 1, 1], vertical_alignment="center")
 
-# CSV compat Excel FR
+# CSV compat Excel FR (; + BOM)
 with ex1:
     csv_bytes = export_df.to_csv(index=False, sep=";", encoding="utf-8-sig").encode("utf-8-sig")
     st.download_button(
