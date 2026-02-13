@@ -29,12 +29,19 @@ LOGO_CANDIDATES = [
     "logo.png",
 ]
 
+# Aliases robustes (FR/EN, variantes avec espaces)
 ALIASES = {
-    "first_name": ["first_name", "firstname", "prenom", "prénom", "given name", "given_name"],
-    "last_name":  ["last_name", "lastname", "nom", "surname", "family name", "family_name"],
-    "email":      ["email", "e-mail", "mail", "courriel"],
-    "company":    ["company", "societe", "société", "organisation", "organization", "structure"],
-    "function":   ["fonction", "function", "job", "poste", "title"],
+    "first_name": [
+        "first_name", "firstname", "first name", "given name", "given_name",
+        "prenom", "prénom"
+    ],
+    "last_name": [
+        "last_name", "lastname", "last name", "surname", "family name", "family_name",
+        "nom"
+    ],
+    "email": ["email", "e-mail", "mail", "courriel"],
+    "company": ["company", "societe", "société", "organisation", "organization", "structure"],
+    "function": ["fonction", "function", "job", "poste", "title"],
 }
 STANDARD_ORDER = ["first_name", "last_name", "email", "company", "function"]
 
@@ -47,7 +54,12 @@ def now_str() -> str:
 
 
 def norm(s: str) -> str:
-    s = str(s).strip().lower()
+    """Normalise les noms de colonnes (tabs, retours, espaces multiples, accents…)."""
+    s = str(s)
+    s = s.replace("\u00A0", " ")  # espace insécable
+    s = s.replace("\t", " ")
+    s = s.replace("\n", " ")
+    s = s.strip().lower()
     s = re.sub(r"\s+", " ", s)
     return s
 
@@ -67,12 +79,17 @@ def standardize_columns(df: pd.DataFrame) -> pd.DataFrame:
 
     mapping = {}
     used_std = set()
+
     for std, candidates in ALIASES.items():
+        candidates_norm = set(norm(x) for x in candidates)
         for c in original_cols:
-            if norm_cols[c] in candidates and std not in used_std:
+            nc = norm_cols[c]
+            # match direct OU match "commence par" (utile si Excel colle des trucs bizarres)
+            if (nc in candidates_norm or any(nc.startswith(cand) for cand in candidates_norm)) and std not in used_std:
                 mapping[c] = std
                 used_std.add(std)
                 break
+
     return df.rename(columns=mapping)
 
 
@@ -103,7 +120,7 @@ def load_excel(uploaded_file) -> pd.DataFrame:
     df = ensure_internal_columns(df)
     df = df.fillna("")
 
-    # ID unique par ligne => évite StreamlitDuplicateElementKey
+    # ID unique par ligne -> pas de StreamlitDuplicateElementKey
     df["__base_id"] = df.apply(make_base_id, axis=1)
     df["__id"] = df["__base_id"] + "|row:" + df.index.astype(str)
     df = df.drop(columns=["__base_id"], errors="ignore")
@@ -123,7 +140,7 @@ def search_text(row: pd.Series, cols: list[str]) -> str:
 def build_exports(df: pd.DataFrame) -> tuple[bytes, bytes, bytes]:
     export_df = df.drop(columns=["__id"], errors="ignore").copy()
 
-    # CSV Excel FR = séparateur ;
+    # CSV Excel FR : séparateur ;
     csv_all = export_df.to_csv(index=False, sep=";", encoding="utf-8-sig").encode("utf-8-sig")
     present_only = export_df[export_df["present"] == True].copy()
     csv_present = present_only.to_csv(index=False, sep=";", encoding="utf-8-sig").encode("utf-8-sig")
@@ -162,7 +179,6 @@ def smtp_send_email(to_addr: str, subject: str, body: str, attachment_bytes: byt
     user = st.secrets["SMTP_USER"]
     pwd = st.secrets["SMTP_PASS"]
 
-    # Port 465 => SSL direct, sinon STARTTLS (587 généralement)
     if port == 465:
         with smtplib.SMTP_SSL(host, port, timeout=25) as server:
             server.login(user, pwd)
@@ -198,7 +214,6 @@ def smtp_test_connection() -> None:
 # =========================
 st.set_page_config(page_title=APP_TITLE, layout="wide")
 
-# CSS (tablette + contrastes + boutons)
 css = f"""
 <style>
 .stApp {{ background: {BG}; }}
@@ -229,20 +244,14 @@ h1, h2, h3, h4 {{ color: {TEXT}; }}
   font-weight: 800 !important;
   min-height: 46px !important;
 }}
-/* Blindage: certains thèmes mettent le texte en gris => on force */
-.stButton > button * {{
-  color: #ffffff !important;
-}}
+.stButton > button * {{ color: #ffffff !important; }}
 
 button[kind="secondary"], .stButton > button[kind="secondary"] {{
   background: #ffffff !important;
   color: {PRIMARY} !important;
   border: 2px solid {PRIMARY} !important;
 }}
-/* Texte secondary (Annuler) */
-button[kind="secondary"] * {{
-  color: {PRIMARY} !important;
-}}
+button[kind="secondary"] * {{ color: {PRIMARY} !important; }}
 
 @media (max-width: 980px) {{
   .block-container {{ padding-left: 1rem; padding-right: 1rem; }}
@@ -260,7 +269,7 @@ logo_path = find_logo_path()
 c1, c2 = st.columns([1, 6], vertical_alignment="center")
 with c1:
     if logo_path:
-        st.image(logo_path, width=95)  # un poil plus compact
+        st.image(logo_path, width=95)
 with c2:
     st.markdown(f"## {APP_TITLE}")
     st.caption("Importez votre liste, recherchez un participant, émargez, puis exportez / envoyez la feuille d’émargement.")
@@ -294,7 +303,7 @@ if "df" not in st.session_state or st.session_state.get("filename") != uploaded.
 df = st.session_state.df
 
 # =========================
-# DASHBOARD (camembert SEUL)
+# DASHBOARD (camembert)
 # =========================
 total = len(df)
 present_count = int(df["present"].sum())
@@ -318,7 +327,7 @@ st.altair_chart(donut, use_container_width=True)
 st.divider()
 
 # =========================
-# KPIs + SEARCH + FILTERS (camembert AU DESSUS ✅)
+# KPIs + SEARCH + FILTERS
 # =========================
 k1, k2, k3, k4 = st.columns([1, 1, 1, 2], vertical_alignment="center")
 k1.metric("Participants", total)
@@ -370,7 +379,6 @@ view_page = view.iloc[start:end].copy()
 
 st.subheader("Liste des participants")
 
-# Header row
 h = st.columns([2, 2, 3, 3, 3, 2, 2])
 h[0].markdown("**Prénom**")
 h[1].markdown("**Nom**")
@@ -451,7 +459,7 @@ st.markdown("### Envoi par email")
 ok_smtp, missing = smtp_config_available()
 
 if not ok_smtp:
-    st.warning("SMTP non configuré → bouton d’envoi désactivé.")
+    st.warning("SMTP non configuré : les boutons restent cliquables, mais l’envoi échouera tant que les secrets ne sont pas remplis.")
     st.caption("Il manque : " + ", ".join(missing))
     with st.expander("Configurer l’envoi email (Secrets Streamlit)"):
         st.code(
@@ -474,30 +482,35 @@ email_body = st.text_area(
 b1, b2 = st.columns([1, 2], vertical_alignment="center")
 
 with b1:
-    if st.button("🧪 Tester SMTP", use_container_width=True, disabled=not ok_smtp):
-        try:
-            smtp_test_connection()
-            st.success("Connexion SMTP OK (authentification réussie).")
-        except Exception as e:
-            st.error("Test SMTP échoué. (Très probablement réseau/port/identifiants)")
-            st.caption(repr(e))
+    if st.button("🧪 Tester SMTP", use_container_width=True):
+        if not ok_smtp:
+            st.error("SMTP non configuré : ajoute les secrets dans Streamlit Cloud (Manage app → Settings → Secrets).")
+        else:
+            try:
+                smtp_test_connection()
+                st.success("Connexion SMTP OK (authentification réussie).")
+            except Exception as e:
+                st.error("Test SMTP échoué (réseau/port/identifiants).")
+                st.caption(repr(e))
 
 with b2:
-    if st.button("📧 Envoyer l’export à evenements@institutimagine.org", use_container_width=True, disabled=not ok_smtp):
-        try:
-            smtp_send_email(
-                to_addr=to_email or DEFAULT_TO_EMAIL,
-                subject=email_subject,
-                body=email_body,
-                attachment_bytes=xlsx_all,
-                filename="emargement_export.xlsx",
-            )
-            st.success(f"Email envoyé à {to_email or DEFAULT_TO_EMAIL}")
-        except Exception as e:
-            st.error("Échec de l’envoi email. Regarde l’erreur ci-dessous.")
-            st.caption(repr(e))
-            st.info(
-                "Si tu es sur Streamlit Cloud : ton SMTP d’entreprise peut être inaccessible (pare-feu). "
-                "Dans ce cas, il faut soit un SMTP accessible publiquement (ex: Gmail/SendGrid), "
-                "soit un relais SMTP externe autorisé."
-            )
+    if st.button("📧 Envoyer l’export à evenements@institutimagine.org", use_container_width=True):
+        if not ok_smtp:
+            st.error("SMTP non configuré : ajoute les secrets dans Streamlit Cloud (Manage app → Settings → Secrets).")
+        else:
+            try:
+                smtp_send_email(
+                    to_addr=to_email or DEFAULT_TO_EMAIL,
+                    subject=email_subject,
+                    body=email_body,
+                    attachment_bytes=xlsx_all,
+                    filename="emargement_export.xlsx",
+                )
+                st.success(f"Email envoyé à {to_email or DEFAULT_TO_EMAIL}")
+            except Exception as e:
+                st.error("Échec de l’envoi email.")
+                st.caption(repr(e))
+                st.info(
+                    "Si tu es sur Streamlit Cloud : le SMTP interne de l’institut peut être bloqué. "
+                    "Dans ce cas, il faut un SMTP accessible publiquement (ou un relais autorisé)."
+                )
