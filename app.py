@@ -33,39 +33,46 @@ def find_logo_path() -> str | None:
             return str(p)
     return None
 
-# CSS pour un rendu plus “pro”
+# =========================
+# CSS (rendu "pro" + boutons lisibles)
+# =========================
 st.markdown(
     f"""
 <style>
 .stApp {{ background: {BG}; }}
-.block-container {{ padding-top: 1.5rem; max-width: 1250px; }}
+.block-container {{ padding-top: 1.2rem; max-width: 1250px; }}
 
 h1, h2, h3, h4 {{ color: {TEXT}; }}
 small, .stCaption, p {{ color: {MUTED}; }}
 
-/* Boutons : texte blanc forcé */
-.stButton > button {{
-  background: {PRIMARY};
-  color: white !important;
-  border: 0;
-  border-radius: 12px;
-  padding: 0.55rem 0.9rem;
-  font-weight: 650;
-}}
-.stButton > button:hover {{
-  filter: brightness(0.95);
+/* Cartes / lignes : blanc + ombre douce */
+[data-testid="stHorizontalBlock"] {{
+  background: white;
+  border-radius: 14px;
+  padding: 0.38rem 0.65rem;
+  margin-bottom: 0.35rem;
+  box-shadow: 0 1px 10px rgba(0,0,0,0.06);
 }}
 
+/* Inputs */
 .stTextInput input {{
   border-radius: 12px;
 }}
 
-[data-testid="stHorizontalBlock"] {{
-  background: white;
-  border-radius: 14px;
-  padding: 0.35rem 0.6rem;
-  margin-bottom: 0.35rem;
-  box-shadow: 0 1px 10px rgba(0,0,0,0.06);
+/* Boutons : forçage texte blanc + rose */
+.stButton > button {{
+  background-color: {PRIMARY} !important;
+  color: white !important;
+  border: none !important;
+  border-radius: 12px !important;
+  padding: 0.55rem 0.9rem;
+  font-weight: 700 !important;
+  opacity: 1 !important;
+}}
+
+.stButton > button:hover {{
+  background-color: {PRIMARY} !important;
+  filter: brightness(0.92);
 }}
 </style>
 """,
@@ -159,7 +166,6 @@ logo_path = find_logo_path()
 h1, h2 = st.columns([1, 5], vertical_alignment="center")
 with h1:
     if logo_path:
-        # LOGO réduit (au lieu de prendre toute la colonne)
         st.image(logo_path, width=140)
 with h2:
     st.markdown(f"## {APP_TITLE}")
@@ -279,10 +285,18 @@ for _, row in view.iterrows():
     cols[4].write(fu)
 
     is_present = bool(row["present"])
-    cols[5].write("✅ Présent" if is_present else "⬜ À émarger")
+    if is_present:
+        cols[5].markdown(
+            "<span style='background:#DCFCE7;color:#166534;padding:4px 10px;border-radius:8px;font-weight:700;'>✔ Présent</span>",
+            unsafe_allow_html=True
+        )
+    else:
+        cols[5].markdown(
+            "<span style='background:#F3F4F6;color:#374151;padding:4px 10px;border-radius:8px;font-weight:700;'>À émarger</span>",
+            unsafe_allow_html=True
+        )
 
     if not is_present:
-        # Émarger = rose (primary), Annuler = gris (default)
         if cols[6].button("Émarger", key=f"em_{rid}", use_container_width=True, type="primary"):
             idx = df.index[df["__id"] == rid]
             if len(idx):
@@ -293,7 +307,8 @@ for _, row in view.iterrows():
                 st.session_state.df = df
             st.rerun()
     else:
-        if cols[6].button("Annuler", key=f"an_{rid}", use_container_width=True):
+        # Bouton secondaire (gris) + texte lisible grâce au CSS/Streamlit
+        if cols[6].button("Annuler", key=f"an_{rid}", use_container_width=True, type="secondary"):
             idx = df.index[df["__id"] == rid]
             if len(idx):
                 i = idx[0]
@@ -311,7 +326,6 @@ st.divider()
 st.subheader("Derniers émargés")
 last_df = df[df["present"] == True].copy()
 if len(last_df):
-    # tri par datetime texte (format YYYY-MM-DD HH:MM:SS => tri lexical OK)
     last_df = last_df.sort_values(by=["checkin_time"], ascending=False, kind="stable").head(8)
     show_cols = [c for c in ["first_name", "last_name", "company", "checkin_time", "checkin_by"] if c in last_df.columns]
     st.dataframe(last_df.drop(columns=["__id"], errors="ignore")[show_cols], use_container_width=True, hide_index=True)
