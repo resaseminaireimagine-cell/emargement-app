@@ -1,3 +1,6 @@
-streamlit>=1.32
-pandas>=2.0
-openpyxl>=3.1
+streamlit
+pandas
+openpyxl
+streamlit-keyup==0.3.0
+altair
+
