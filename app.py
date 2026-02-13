@@ -1,5 +1,5 @@
 # app.py — Outil d’émargement — Institut Imagine
-# Version finale (sans dépendance streamlit-keyup) — recherche instantanée, export CSV/Excel, pagination bas, heure FR.
+# Version finale (sans matplotlib, sans streamlit-keyup) — recherche instantanée, export CSV/Excel, pagination bas, heure FR.
 
 from __future__ import annotations
 
@@ -102,50 +102,32 @@ def ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
     }
 
     # Apply mappings
-    new_cols = []
-    for c in df.columns:
-        new_cols.append(mappings.get(c, c))
-    df.columns = new_cols
+    df.columns = [mappings.get(c, c) for c in df.columns]
 
-    # Keep only needed columns (but preserve extra cols if you want)
+    # Ensure required base columns exist
     for required in ["first_name", "last_name"]:
         if required not in df.columns:
             df[required] = ""
 
-    if "email" not in df.columns:
-        df["email"] = ""
-    if "company" not in df.columns:
-        df["company"] = ""
-    if "role" not in df.columns:
-        df["role"] = ""
+    for c in ["email", "company", "role", "checkin_time", "checkin_by"]:
+        if c not in df.columns:
+            df[c] = ""
 
-    # Status columns
+    # present normalization
     if "present" not in df.columns:
         df["present"] = False
     else:
-        # Normalize present values
         df["present"] = df["present"].apply(
             lambda x: True
             if str(x).strip().lower() in ["true", "1", "yes", "y", "oui", "present", "présent"]
             else False
         )
 
-    if "checkin_time" not in df.columns:
-        df["checkin_time"] = ""
-    else:
-        df["checkin_time"] = df["checkin_time"].fillna("").astype(str)
-
-    if "checkin_by" not in df.columns:
-        df["checkin_by"] = ""
-    else:
-        df["checkin_by"] = df["checkin_by"].fillna("").astype(str)
-
-    # Clean NaN in key fields
-    for c in ["first_name", "last_name", "email", "company", "role"]:
+    # Clean NaN + spaces
+    for c in ["first_name", "last_name", "email", "company", "role", "checkin_time", "checkin_by"]:
         df[c] = df[c].fillna("").astype(str).str.strip()
 
-    # Add internal unique id (stable-ish)
-    # Use existing index + normalized name/email to reduce duplicate key collisions
+    # Stable-ish internal unique id
     df["_rid"] = (
         df.index.astype(str)
         + "|"
@@ -166,8 +148,7 @@ def ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
             row.get("role", ""),
         ]
         joined = " ".join([p for p in parts if p])
-        joined = _strip_accents(joined).lower()
-        return joined
+        return _strip_accents(joined).lower()
 
     df["_search"] = df.apply(build_search, axis=1)
 
@@ -177,10 +158,7 @@ def ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
 def to_excel_bytes(df: pd.DataFrame) -> bytes:
     buf = io.BytesIO()
     export = df.copy()
-
-    # Clean internal columns
     export = export.drop(columns=[c for c in export.columns if c.startswith("_")], errors="ignore")
-
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
         export.to_excel(writer, index=False, sheet_name="Emargement")
     buf.seek(0)
@@ -190,7 +168,6 @@ def to_excel_bytes(df: pd.DataFrame) -> bytes:
 def to_csv_bytes(df: pd.DataFrame) -> bytes:
     export = df.copy()
     export = export.drop(columns=[c for c in export.columns if c.startswith("_")], errors="ignore")
-    # Excel FR friendly: separator ;
     return export.to_csv(index=False, sep=";", encoding="utf-8-sig").encode("utf-8-sig")
 
 
@@ -198,15 +175,12 @@ def inject_css():
     st.markdown(
         f"""
 <style>
-/* Global */
 html, body, [class*="css"] {{
   font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
 }}
-/* Page background */
 .main {{
   background: #f6f7fb;
 }}
-/* Header card */
 .im-header {{
   background: white;
   border-radius: 18px;
@@ -227,7 +201,6 @@ html, body, [class*="css"] {{
   color: #6b7280;
   font-size: 14px;
 }}
-/* KPI cards row */
 .kpi {{
   background: white;
   border-radius: 18px;
@@ -244,22 +217,6 @@ html, body, [class*="css"] {{
   font-weight: 800;
   line-height: 1;
 }}
-/* Filter bar */
-.filters {{
-  background: white;
-  border-radius: 18px;
-  padding: 14px 16px;
-  box-shadow: 0 6px 18px rgba(15, 23, 42, 0.06);
-}}
-/* Table card row */
-.rowcard {{
-  background: white;
-  border-radius: 18px;
-  padding: 10px 14px;
-  box-shadow: 0 6px 18px rgba(15, 23, 42, 0.06);
-  margin-bottom: 12px;
-}}
-/* Status pill */
 .pill {{
   display:inline-flex;
   align-items:center;
@@ -276,7 +233,6 @@ html, body, [class*="css"] {{
   background: #ecfdf5;
   color: #065f46;
 }}
-/* Buttons */
 div.stButton > button {{
   border-radius: 14px !important;
   border: 2px solid {ACCENT} !important;
@@ -284,11 +240,6 @@ div.stButton > button {{
   font-weight: 800 !important;
   white-space: nowrap !important;
 }}
-/* Primary action in row: force white text */
-button[kind="secondary"] {{
-  /* leave default */
-}}
-/* Streamlit sometimes sets inline colors; we ensure contrast via filter for our accent buttons */
 .im-accent button {{
   background: {ACCENT} !important;
   color: white !important;
@@ -296,18 +247,15 @@ button[kind="secondary"] {{
 .im-accent button * {{
   color: white !important;
 }}
-/* Search input look */
 div[data-baseweb="input"] > div {{
   border-radius: 14px !important;
 }}
-/* Tablet tweaks */
 @media (max-width: 900px) {{
   .im-title {{ font-size: 26px; }}
   .kpi-value {{ font-size: 34px; }}
   .pill {{ font-size: 12px; padding: 5px 8px; }}
   div.stButton > button {{ padding: 9px 10px !important; font-size: 13px !important; }}
 }}
-/* Prevent last name wrapping: we keep it on one line and allow horizontal scroll inside cell if needed */
 .nowrap {{
   white-space: nowrap;
   overflow: hidden;
@@ -323,10 +271,8 @@ div[data-baseweb="input"] > div {{
 # Streamlit App
 # -----------------------------
 st.set_page_config(page_title=APP_TITLE, layout="wide")
-
 inject_css()
 
-# Sidebar settings
 with st.sidebar:
     st.markdown("## Réglages")
     agent_name = st.text_input("Nom de l’agent (optionnel)", placeholder="Ex: Ambroise", key="agent_name")
@@ -357,7 +303,6 @@ with c2:
 
 st.write("")
 
-# Upload
 uploaded = st.file_uploader("Importer un fichier Excel (.xlsx)", type=["xlsx"], accept_multiple_files=False)
 
 if "df" not in st.session_state:
@@ -366,33 +311,26 @@ if "df" not in st.session_state:
 if uploaded is not None:
     try:
         raw = pd.read_excel(uploaded)
-        df = ensure_columns(raw)
-
-        # Store once per upload (reset pagination & filters)
-        st.session_state.df = df
+        df0 = ensure_columns(raw)
+        st.session_state.df = df0
         st.session_state.page = 1
-    except Exception as e:
+    except Exception:
         st.error("Impossible de lire ce fichier Excel. Vérifiez qu’il s’agit bien d’un .xlsx valide.")
         st.stop()
 
 df = st.session_state.df
-
 if df is None:
     st.info("➡️ Importez un fichier Excel pour commencer.")
     st.stop()
 
-# Pie chart ABOVE KPI band (camembert)
+# Counts
 present_count = int(df["present"].sum())
 total_count = int(len(df))
 remaining_count = total_count - present_count
 
-pie_df = pd.DataFrame(
-    {"Statut": ["Présents", "Restants"], "Nombre": [present_count, remaining_count]}
-)
-
-# Use Altair via Streamlit's native chart (no seaborn); keep default colors (Streamlit chooses).
+# Camembert (Altair only, no matplotlib)
 st.markdown("### Répartition")
-st.pyplot(None)  # no-op placeholder avoidance for some environments
+pie_df = pd.DataFrame({"Statut": ["Présents", "Restants"], "Nombre": [present_count, remaining_count]})
 
 try:
     import altair as alt
@@ -405,8 +343,7 @@ try:
     )
     st.altair_chart(pie, use_container_width=True)
 except Exception:
-    # If altair unavailable for any reason, fallback to text
-    st.caption("Graphique indisponible (altair).")
+    st.caption(f"Présents : {present_count} — Restants : {remaining_count}")
 
 # KPI + search
 k1, k2, k3, k4 = st.columns([1, 1, 1, 2])
@@ -440,16 +377,9 @@ with k3:
 """,
         unsafe_allow_html=True,
     )
-
 with k4:
-    # IMPORTANT: no st.form() here -> filtering is instant; no Enter required
-    search = st.text_input(
-        "Recherche",
-        placeholder="Nom, prénom, email, société…",
-        key="search_input",
-    )
-    search = (search or "").strip().lower()
-    search = _strip_accents(search)
+    search = st.text_input("Recherche", placeholder="Nom, prénom, email, société…", key="search_input")
+    search = _strip_accents((search or "").strip().lower())
 
 # Filters
 st.write("")
@@ -487,12 +417,10 @@ with ex3:
 
 # Apply filters + search
 view = df.copy()
-
 if only_not_checked:
     view = view[view["present"] == False]  # noqa: E712
 if only_present:
     view = view[view["present"] == True]  # noqa: E712
-
 if search:
     view = view[view["_search"].str.contains(search, na=False)]
 
@@ -503,11 +431,7 @@ if "page" not in st.session_state:
 total_rows = len(view)
 total_pages = max(1, (total_rows + page_size - 1) // page_size)
 
-# Clamp page if needed
-if st.session_state.page > total_pages:
-    st.session_state.page = total_pages
-if st.session_state.page < 1:
-    st.session_state.page = 1
+st.session_state.page = max(1, min(st.session_state.page, total_pages))
 
 start = (st.session_state.page - 1) * page_size
 end = start + page_size
@@ -521,7 +445,10 @@ with p1:
         st.session_state.page -= 1
         st.rerun()
 with p2:
-    st.markdown(f"<div style='text-align:center; font-weight:800; padding-top:10px;'>Page {st.session_state.page} / {total_pages}</div>", unsafe_allow_html=True)
+    st.markdown(
+        f"<div style='text-align:center; font-weight:800; padding-top:10px;'>Page {st.session_state.page} / {total_pages}</div>",
+        unsafe_allow_html=True,
+    )
 with p3:
     if st.button("Page suivante ➡️", use_container_width=True, disabled=(st.session_state.page >= total_pages)):
         st.session_state.page += 1
@@ -539,8 +466,6 @@ for col, txt in zip(h, headers):
 
 st.write("")
 
-# Rows
-# Note: we modify st.session_state.df via _rid lookup, not the filtered view.
 df_master = st.session_state.df
 
 def set_presence(rid: str, present: bool):
@@ -562,7 +487,6 @@ for _, row in page_view.iterrows():
     rid = row["_rid"]
     cols = st.columns([1.1, 1.2, 1.6, 1.3, 1.2, 1.0, 1.0])
 
-    # Values
     first = row.get("first_name", "")
     last = row.get("last_name", "")
     email = row.get("email", "")
@@ -571,10 +495,8 @@ for _, row in page_view.iterrows():
     is_present = bool(row.get("present", False))
 
     with cols[0]:
-        st.markdown(f"<div class='nowrap'>{first}</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='nowrap' title='{first}'>{first}</div>", unsafe_allow_html=True)
     with cols[1]:
-        # Ensure full name visible as much as possible, but no wrap.
-        # On small screens it may ellipsize; user can still export full value.
         st.markdown(f"<div class='nowrap' title='{last}'>{last}</div>", unsafe_allow_html=True)
     with cols[2]:
         st.markdown(f"<div class='nowrap' title='{email}'>{email}</div>", unsafe_allow_html=True)
@@ -590,20 +512,18 @@ for _, row in page_view.iterrows():
             st.markdown("<span class='pill'>⬜ À émarger</span>", unsafe_allow_html=True)
 
     with cols[6]:
+        st.markdown("<div class='im-accent'>", unsafe_allow_html=True)
         if is_present:
-            st.markdown("<div class='im-accent'>", unsafe_allow_html=True)
             if st.button("Annuler", key=f"undo_{rid}", use_container_width=True):
                 set_presence(rid, False)
                 st.rerun()
-            st.markdown("</div>", unsafe_allow_html=True)
         else:
-            st.markdown("<div class='im-accent'>", unsafe_allow_html=True)
             if st.button("Émarger", key=f"do_{rid}", use_container_width=True):
                 set_presence(rid, True)
                 st.rerun()
-            st.markdown("</div>", unsafe_allow_html=True)
+        st.markdown("</div>", unsafe_allow_html=True)
 
-# Pagination controls (BOTTOM) — requested
+# Pagination controls (BOTTOM)
 st.write("")
 b1, b2, b3 = st.columns([2, 1, 2])
 with b1:
@@ -611,12 +531,14 @@ with b1:
         st.session_state.page -= 1
         st.rerun()
 with b2:
-    st.markdown(f"<div style='text-align:center; font-weight:800; padding-top:10px;'>Page {st.session_state.page} / {total_pages}</div>", unsafe_allow_html=True)
+    st.markdown(
+        f"<div style='text-align:center; font-weight:800; padding-top:10px;'>Page {st.session_state.page} / {total_pages}</div>",
+        unsafe_allow_html=True,
+    )
 with b3:
     if st.button("Page suivante ➡️ ", use_container_width=True, disabled=(st.session_state.page >= total_pages), key="next_bottom"):
         st.session_state.page += 1
         st.rerun()
 
-# Small footer info (optional)
 st.write("")
 st.caption("Heure d’émargement : fuseau Europe/Paris. Export conseillé en fin de session.")
