@@ -1,5 +1,6 @@
 import io
 import re
+import hashlib
 from pathlib import Path
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -19,6 +20,10 @@ TEXT = "#111827"
 MUTED = "#6B7280"
 
 PARIS_TZ = ZoneInfo("Europe/Paris")
+
+# Autosave (sans action utilisateur)
+AUTOSAVE_DIR = Path("/tmp/imagine_emargement_autosave")
+AUTOSAVE_DIR.mkdir(parents=True, exist_ok=True)
 
 LOGO_CANDIDATES = [
     "logo_rose.png",
@@ -100,7 +105,9 @@ def ensure_internal_columns(df: pd.DataFrame) -> pd.DataFrame:
     if "present" not in df.columns:
         df["present"] = False
     else:
-        df["present"] = df["present"].apply(lambda x: str(x).strip().lower() in ["true", "1", "yes", "oui", "vrai"])
+        df["present"] = df["present"].apply(
+            lambda x: str(x).strip().lower() in ["true", "1", "yes", "oui", "vrai"]
+        )
     if "checkin_time" not in df.columns:
         df["checkin_time"] = ""
     if "checkin_by" not in df.columns:
@@ -118,15 +125,61 @@ def make_base_id(row: pd.Series) -> str:
     return f"name:{ln}|{fn}|{co}"
 
 
+def add_ids(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    if "__base_id" not in df.columns:
+        df["__base_id"] = df.apply(make_base_id, axis=1)
+    # __id unique pour les keys UI (doit être unique même si base_id dupliqué)
+    df["__id"] = df["__base_id"] + "|row:" + df.index.astype(str)
+    return df
+
+
+def hash_uploaded_file(uploaded_file) -> str:
+    """
+    Hash stable du fichier importé (pour lier une autosave au bon Excel).
+    """
+    data = uploaded_file.getvalue()
+    return hashlib.sha256(data).hexdigest()[:16]
+
+
+def autosave_path(file_hash: str) -> Path:
+    return AUTOSAVE_DIR / f"autosave_{file_hash}.csv"
+
+
+def autosave_df(df: pd.DataFrame, file_hash: str) -> None:
+    """
+    Sauvegarde automatique côté serveur.
+    """
+    p = autosave_path(file_hash)
+    # On enlève __id (pure UI) mais on garde __base_id + colonnes métier
+    export_df = df.drop(columns=["__id"], errors="ignore").copy()
+    export_df.to_csv(p, index=False, sep=";", encoding="utf-8-sig")
+
+
+def try_load_autosave(file_hash: str) -> pd.DataFrame | None:
+    """
+    Si une autosave existe pour ce fichier, on la charge.
+    """
+    p = autosave_path(file_hash)
+    if not p.exists():
+        return None
+    try:
+        df = pd.read_csv(p, sep=";", encoding="utf-8-sig")
+        df = standardize_columns(df)
+        df = ensure_internal_columns(df)
+        df = df.fillna("")
+        df = add_ids(df)
+        return df
+    except Exception:
+        return None
+
+
 def load_excel(uploaded_file) -> pd.DataFrame:
     df = pd.read_excel(uploaded_file, engine="openpyxl")
     df = standardize_columns(df)
     df = ensure_internal_columns(df)
     df = df.fillna("")
-
-    # base_id stable (pour log / restauration) + id unique pour UI
-    df["__base_id"] = df.apply(make_base_id, axis=1)
-    df["__id"] = df["__base_id"] + "|row:" + df.index.astype(str)
+    df = add_ids(df)
     return df
 
 
@@ -154,71 +207,6 @@ def build_exports(df: pd.DataFrame) -> tuple[bytes, bytes, bytes]:
     xlsx = buffer.getvalue()
 
     return csv_all, csv_present, xlsx
-
-
-def build_log_csv(log_rows: list[dict]) -> bytes:
-    if not log_rows:
-        df_log = pd.DataFrame(columns=["timestamp", "action", "base_id", "agent"])
-    else:
-        df_log = pd.DataFrame(log_rows)
-    return df_log.to_csv(index=False, sep=";", encoding="utf-8-sig").encode("utf-8-sig")
-
-
-def apply_log_to_df(df: pd.DataFrame, log_df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Applique un LOG à un DF importé : on garde la dernière action par base_id.
-    """
-    df = df.copy()
-    if log_df.empty:
-        return df
-
-    # trouver colonnes log
-    def find_col(target: str, variants: list[str]):
-        for c in log_df.columns:
-            if norm(c) == target:
-                return c
-        for v in variants:
-            for c in log_df.columns:
-                if norm(c) == v:
-                    return c
-        return None
-
-    c_ts = find_col("timestamp", ["time", "date", "datetime", "heure"])
-    c_action = find_col("action", ["event", "type"])
-    c_base = find_col("base_id", ["id", "participant_id"])
-    c_agent = find_col("agent", ["by", "user", "checkin_by"])
-
-    if not c_action or not c_base:
-        return df
-
-    tmp = log_df.copy()
-    if c_ts:
-        tmp["_ts"] = pd.to_datetime(tmp[c_ts], errors="coerce")
-        tmp = tmp.sort_values(by=["_ts"], kind="stable")
-    tmp = tmp.dropna(subset=[c_base])
-    last = tmp.groupby(tmp[c_base]).tail(1)
-
-    by_base = df.set_index("__base_id", drop=False)
-
-    for _, r in last.iterrows():
-        base_id = str(r[c_base])
-        action = str(r[c_action]).strip().lower()
-        ts = str(r[c_ts]) if c_ts else ""
-        agent = str(r[c_agent]) if c_agent else ""
-
-        if base_id not in by_base.index:
-            continue
-
-        if action in ["emarger", "émarger", "checkin", "present", "présent", "in"]:
-            by_base.loc[base_id, "present"] = True
-            by_base.loc[base_id, "checkin_time"] = ts
-            by_base.loc[base_id, "checkin_by"] = agent
-        elif action in ["annuler", "cancel", "out", "remove"]:
-            by_base.loc[base_id, "present"] = False
-            by_base.loc[base_id, "checkin_time"] = ""
-            by_base.loc[base_id, "checkin_by"] = ""
-
-    return by_base.reset_index(drop=True)
 
 
 def pager(page_count: int, page_value: int, label: str):
@@ -309,7 +297,6 @@ h1, h2, h3, h4 {{ color: {TEXT}; }}
   font-size: 1.0rem;
 }}
 
-/* Boutons */
 .stButton > button {{
   background-color: {PRIMARY} !important;
   color: #ffffff !important;
@@ -330,7 +317,6 @@ button[kind="secondary"], .stButton > button[kind="secondary"] {{
 }}
 button[kind="secondary"] * {{ color: {PRIMARY} !important; }}
 
-/* Badges */
 .badge-present {{
   background:#DCFCE7; color:#166534; padding:6px 12px; border-radius:10px; font-weight:800;
   display:inline-block; white-space:nowrap;
@@ -340,7 +326,7 @@ button[kind="secondary"] * {{ color: {PRIMARY} !important; }}
   display:inline-block; white-space:nowrap;
 }}
 
-/* Noms complets (PAS de coupure / PAS d'ellipsis) */
+/* Nom complet : pas de retour à la ligne, pas d'ellipsis */
 .cell-nowrap {{
   white-space: nowrap !important;
   overflow: visible !important;
@@ -350,7 +336,6 @@ button[kind="secondary"] * {{ color: {PRIMARY} !important; }}
 @media (max-width: 980px) {{
   .block-container {{ padding-left: 1rem; padding-right: 1rem; }}
 
-  /* Tablette : textes badges/boutons un peu plus petits pour éviter la coupure */
   .badge-present, .badge-todo {{
     font-size: 0.90rem;
     padding: 6px 10px;
@@ -390,13 +375,11 @@ with st.sidebar:
     tablet_mode = st.toggle("Mode tablette (touch)", value=True)
     st.markdown("---")
     st.caption("Fuseau horaire : **Europe/Paris** ✅")
-    st.markdown("---")
-    st.subheader("Sécurité")
-    st.caption("Télécharge un LOG pendant l’événement (ou à la fin) pour pouvoir restaurer l’état en cas de plantage.")
+    st.caption("Sécurité : autosauvegarde automatique à chaque action ✅")
 
 
 # =========================
-# UPLOAD + RESTORE
+# UPLOAD + AUTO-RESTORE
 # =========================
 uploaded = st.file_uploader("Importer un fichier Excel (.xlsx)", type=["xlsx"])
 
@@ -404,52 +387,32 @@ if uploaded is None:
     st.info("➡️ Importez un fichier Excel pour commencer.")
     st.stop()
 
-if "df" not in st.session_state or st.session_state.get("filename") != uploaded.name:
-    st.session_state.df = load_excel(uploaded)
+file_hash = hash_uploaded_file(uploaded)
+
+# (re)charger si nouveau fichier
+if "file_hash" not in st.session_state or st.session_state.get("file_hash") != file_hash:
+    st.session_state.file_hash = file_hash
     st.session_state.filename = uploaded.name
     st.session_state.page = 1
     st.session_state["_prev_query"] = ""
-    st.session_state.log = []
+
+    # auto-restore si autosave existe
+    restored = try_load_autosave(file_hash)
+    if restored is not None:
+        st.session_state.df = restored
+        st.toast("Autosauvegarde restaurée ✅", icon="✅")
+    else:
+        st.session_state.df = load_excel(uploaded)
+        # créer une autosave initiale (utile)
+        autosave_df(st.session_state.df, file_hash)
 
 df = st.session_state.df
-if "log" not in st.session_state:
-    st.session_state.log = []
-
-# Restore depuis log (optionnel)
-with st.expander("🛟 Restaurer depuis un LOG (optionnel)"):
-    st.caption("En cas de crash : ré-importe ton Excel puis uploade le LOG téléchargé pendant l’événement.")
-    log_file = st.file_uploader("Importer un fichier LOG (.csv)", type=["csv"], key="log_restore")
-    if log_file is not None:
-        try:
-            log_df = pd.read_csv(log_file, sep=";", encoding="utf-8-sig")
-            restored = apply_log_to_df(df, log_df)
-            # recréer __id basé sur nouvel index
-            restored["__id"] = restored["__base_id"] + "|row:" + restored.index.astype(str)
-            st.session_state.df = restored
-            df = restored
-            st.success("Restauration appliquée ✅")
-            st.session_state.page = 1
-        except Exception as e:
-            st.error("Impossible de lire / appliquer ce LOG.")
-            st.caption(repr(e))
 
 # =========================
-# SECURITY DOWNLOADS
+# SECURITY BUTTON (sans action d’émargement)
 # =========================
-csv_all, csv_present, xlsx_all = build_exports(df)
-log_bytes = build_log_csv(st.session_state.log)
-
-s1, s2, s3 = st.columns([1, 1, 1], vertical_alignment="center")
-with s1:
-    st.download_button("⬇️ Télécharger LOG", data=log_bytes, file_name="emargement_log.csv",
-                       mime="text/csv", use_container_width=True)
-with s2:
-    st.download_button("⬇️ Backup Excel", data=xlsx_all, file_name="emargement_backup.xlsx",
-                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                       use_container_width=True)
-with s3:
-    st.download_button("⬇️ CSV (présents)", data=csv_present, file_name="emargement_presents.csv",
-                       mime="text/csv", use_container_width=True)
+# Rien à cliquer pour sauvegarder. On affiche juste l’info.
+st.caption("💾 Autosauvegarde : l’état est enregistré automatiquement après chaque émargement/annulation.")
 
 st.divider()
 
@@ -478,7 +441,7 @@ st.altair_chart(donut, use_container_width=True)
 st.divider()
 
 # =========================
-# KPI + SEARCH
+# KPI + SEARCH + FILTERS
 # =========================
 k1, k2, k3, k4 = st.columns([1, 1, 1, 2], vertical_alignment="center")
 k1.metric("Participants", total)
@@ -504,7 +467,7 @@ with f1:
 with f2:
     show_present_only = st.checkbox("Présents uniquement", value=False)
 with f3:
-    st.caption("Astuce : la recherche remonte automatiquement les meilleurs résultats.")
+    st.caption("La recherche remonte automatiquement les meilleurs résultats.")
 
 st.divider()
 
@@ -513,7 +476,10 @@ st.divider()
 # =========================
 display_cols = [c for c in STANDARD_ORDER if c in df.columns]
 if not display_cols:
-    display_cols = [c for c in df.columns if c not in ["present", "checkin_time", "checkin_by", "__id", "__base_id"]][:4]
+    display_cols = [
+        c for c in df.columns
+        if c not in ["present", "checkin_time", "checkin_by", "__id", "__base_id"]
+    ][:4]
 
 search_cols = list(dict.fromkeys(display_cols + [c for c in ["email", "company", "function"] if c in df.columns]))
 
@@ -522,11 +488,9 @@ view = df.copy()
 if query:
     mask = view.apply(lambda r: query in search_text(r, search_cols), axis=1)
     view = view[mask].copy()
-    # tri par pertinence
     view["_score"] = view.apply(lambda r: relevance_score(r, query), axis=1)
     view = view.sort_values(by=["_score"], ascending=False, kind="stable")
 else:
-    # tri alphabétique quand pas de recherche
     if "last_name" in view.columns and "first_name" in view.columns:
         view = view.sort_values(by=["last_name", "first_name"], kind="stable")
 
@@ -574,17 +538,11 @@ if auto_target_id:
             idx = df.index[df["__id"] == auto_target_id]
             if len(idx):
                 i = idx[0]
-                base_id = df.at[i, "__base_id"]
                 df.at[i, "present"] = True
                 df.at[i, "checkin_time"] = now_paris_str()
                 df.at[i, "checkin_by"] = staff_name
                 st.session_state.df = df
-                st.session_state.log.append({
-                    "timestamp": now_paris_str(),
-                    "action": "emarger",
-                    "base_id": base_id,
-                    "agent": staff_name
-                })
+                autosave_df(df, file_hash)  # ✅ autosave automatique
             st.rerun()
 
     st.divider()
@@ -600,7 +558,6 @@ if "page" not in st.session_state:
     st.session_state.page = 1
 st.session_state.page = min(max(1, st.session_state.page), page_count)
 
-# pagination haut
 pager(page_count, st.session_state.page, label="top")
 
 start = (st.session_state.page - 1) * PAGE_SIZE
@@ -612,6 +569,7 @@ view_page = view.iloc[start:end].copy()
 # =========================
 st.subheader("Liste des participants")
 
+# Plus de place pour Prénom / Nom
 header = st.columns([2.5, 3, 3, 3, 3, 2, 2], vertical_alignment="center")
 header[0].markdown("**Prénom**")
 header[1].markdown("**Nom**")
@@ -628,7 +586,6 @@ def badge_html(is_present: bool) -> str:
 
 for _, row in view_page.iterrows():
     rid = row["__id"]
-    base_id = row["__base_id"]
     is_present = bool(row["present"])
 
     fn = row.get("first_name", "")
@@ -656,12 +613,7 @@ for _, row in view_page.iterrows():
                 df.at[i, "checkin_time"] = now_paris_str()
                 df.at[i, "checkin_by"] = staff_name
                 st.session_state.df = df
-                st.session_state.log.append({
-                    "timestamp": now_paris_str(),
-                    "action": "emarger",
-                    "base_id": base_id,
-                    "agent": staff_name
-                })
+                autosave_df(df, file_hash)  # ✅ autosave automatique
             st.rerun()
     else:
         if cols[6].button("Annuler", key=f"an_{rid}", use_container_width=True, type="secondary"):
@@ -672,15 +624,44 @@ for _, row in view_page.iterrows():
                 df.at[i, "checkin_time"] = ""
                 df.at[i, "checkin_by"] = ""
                 st.session_state.df = df
-                st.session_state.log.append({
-                    "timestamp": now_paris_str(),
-                    "action": "annuler",
-                    "base_id": base_id,
-                    "agent": staff_name
-                })
+                autosave_df(df, file_hash)  # ✅ autosave automatique
             st.rerun()
 
-# pagination bas
 pager(page_count, st.session_state.page, label="bottom")
 
 st.caption(f"Affichage : {start+1}-{min(end, total_rows)} / {total_rows}")
+
+st.divider()
+
+# =========================
+# EXPORTS
+# =========================
+st.subheader("Exports")
+
+csv_all, csv_present, xlsx_all = build_exports(df)
+
+e1, e2, e3 = st.columns([1, 1, 1], vertical_alignment="center")
+with e1:
+    st.download_button(
+        "⬇️ CSV (Excel FR)",
+        data=csv_all,
+        file_name="emargement_export.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
+with e2:
+    st.download_button(
+        "⬇️ CSV (présents)",
+        data=csv_present,
+        file_name="emargement_presents.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
+with e3:
+    st.download_button(
+        "⬇️ Excel (.xlsx)",
+        data=xlsx_all,
+        file_name="emargement_export.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+    )
