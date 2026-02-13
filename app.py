@@ -12,7 +12,7 @@ import altair as alt
 # =========================
 # CONFIG
 # =========================
-APP_TITLE = "Table d’émargement — Institut Imagine"
+APP_TITLE = "Outil d’émargement — Institut Imagine"
 PRIMARY = "#C4007A"   # rose Imagine
 BG = "#F6F7FB"
 TEXT = "#111827"
@@ -105,7 +105,6 @@ def ensure_internal_columns(df: pd.DataFrame) -> pd.DataFrame:
     if "present" not in df.columns:
         df["present"] = False
     else:
-        # Normaliser en bool si l'excel contient "Oui/Non", "TRUE/FALSE", etc.
         df["present"] = df["present"].apply(lambda x: str(x).strip().lower() in ["true", "1", "yes", "oui", "vrai"])
     if "checkin_time" not in df.columns:
         df["checkin_time"] = ""
@@ -188,7 +187,6 @@ def pager(page_count: int, page_value: int, label: str):
 # =========================
 st.set_page_config(page_title=APP_TITLE, layout="wide")
 
-# CSS global
 css = f"""
 <style>
 .stApp {{ background: {BG}; }}
@@ -210,6 +208,7 @@ h1, h2, h3, h4 {{ color: {TEXT}; }}
   font-size: 1.0rem;
 }}
 
+/* Boutons */
 .stButton > button {{
   background-color: {PRIMARY} !important;
   color: #ffffff !important;
@@ -218,7 +217,7 @@ h1, h2, h3, h4 {{ color: {TEXT}; }}
   padding: 0.75rem 1.05rem !important;
   font-weight: 800 !important;
   min-height: 46px !important;
-  white-space: nowrap !important;
+  white-space: nowrap !important; /* évite coupure du texte bouton */
 }}
 .stButton > button * {{ color: #ffffff !important; }}
 
@@ -230,6 +229,7 @@ button[kind="secondary"], .stButton > button[kind="secondary"] {{
 }}
 button[kind="secondary"] * {{ color: {PRIMARY} !important; }}
 
+/* Badges */
 .badge-present {{
   background:#DCFCE7; color:#166534; padding:6px 12px; border-radius:10px; font-weight:800;
   display:inline-block; white-space:nowrap;
@@ -237,6 +237,13 @@ button[kind="secondary"] * {{ color: {PRIMARY} !important; }}
 .badge-todo {{
   background:#F3F4F6; color:#374151; padding:6px 12px; border-radius:10px; font-weight:800;
   display:inline-block; white-space:nowrap;
+}}
+
+/* Empêche les noms (notamment le nom de famille) de passer à la ligne */
+.cell-nowrap {{
+  white-space: nowrap !important;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }}
 
 @media (max-width: 980px) {{
@@ -254,6 +261,11 @@ button[kind="secondary"] * {{ color: {PRIMARY} !important; }}
     padding: 0.70rem 0.90rem !important;
   }}
   .stTextInput input {{ font-size: 1.05rem !important; }}
+
+  /* Tablette : éviter les retours à la ligne sur noms/prénoms */
+  .cell-nowrap {{
+    font-size: 0.98rem;
+  }}
 }}
 </style>
 """
@@ -296,7 +308,8 @@ if uploaded is None:
 if "df" not in st.session_state or st.session_state.get("filename") != uploaded.name:
     st.session_state.df = load_excel(uploaded)
     st.session_state.filename = uploaded.name
-    st.session_state.page = 1  # reset pagination à chaque nouveau fichier
+    st.session_state.page = 1
+    st.session_state["_prev_query"] = ""
 
 df = st.session_state.df
 
@@ -309,7 +322,6 @@ remaining = total - present_count
 
 st.subheader("Tableau de bord")
 
-# Camembert au-dessus des KPIs
 progress_df = pd.DataFrame({"Statut": ["Présents", "Restants"], "Nombre": [present_count, remaining]})
 donut = (
     alt.Chart(progress_df)
@@ -332,8 +344,19 @@ k1, k2, k3, k4 = st.columns([1, 1, 1, 2], vertical_alignment="center")
 k1.metric("Participants", total)
 k2.metric("Présents", present_count)
 k3.metric("Restants", remaining)
+
 with k4:
-    query = st.text_input("Recherche", placeholder="Nom, prénom, email, société…").strip().lower()
+    query = st.text_input(
+        "Recherche",
+        placeholder="Nom, prénom, email, société…",
+        key="search_query",
+    ).strip().lower()
+
+# reset page si la recherche change
+prev_q = st.session_state.get("_prev_query", "")
+if query != prev_q:
+    st.session_state.page = 1
+st.session_state["_prev_query"] = query
 
 f1, f2, f3 = st.columns([1, 1, 2], vertical_alignment="center")
 with f1:
@@ -346,7 +369,7 @@ with f3:
 st.divider()
 
 # =========================
-# LIST / FILTER / PAGINATION
+# FILTER VIEW
 # =========================
 display_cols = [c for c in STANDARD_ORDER if c in df.columns]
 if not display_cols:
@@ -368,6 +391,16 @@ elif only_not_present:
 if "last_name" in view.columns and "first_name" in view.columns:
     view = view.sort_values(by=["last_name", "first_name"], kind="stable")
 
+# Auto-sélection : si 1 seul résultat non émargé
+auto_target_id = None
+if query:
+    candidates = view[view["present"] == False]
+    if len(candidates) == 1:
+        auto_target_id = candidates.iloc[0]["__id"]
+
+# =========================
+# PAGINATION
+# =========================
 PAGE_SIZE = 25 if tablet_mode else 50
 total_rows = len(view)
 page_count = max(1, (total_rows + PAGE_SIZE - 1) // PAGE_SIZE)
@@ -376,7 +409,46 @@ if "page" not in st.session_state:
     st.session_state.page = 1
 st.session_state.page = min(max(1, st.session_state.page), page_count)
 
-# Pagination HAUT (avant la liste)
+# Encart ciblé si match unique
+if auto_target_id:
+    target_row = df[df["__id"] == auto_target_id].iloc[0]
+
+    st.markdown("### 🎯 Participant trouvé")
+    cA, cB = st.columns([5, 2], vertical_alignment="center")
+
+    with cA:
+        st.markdown(
+            f"""
+            <div style="background:white;border-radius:16px;padding:14px 16px;
+                        box-shadow:0 1px 12px rgba(0,0,0,0.06);">
+              <div style="font-weight:900;font-size:1.15rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">
+                {target_row.get("first_name","")} {target_row.get("last_name","")}
+              </div>
+              <div style="color:{MUTED};margin-top:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">
+                {target_row.get("email","")} • {target_row.get("company","")} • {target_row.get("function","")}
+              </div>
+              <div style="margin-top:10px;">
+                <span class='badge-todo'>À émarger</span>
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    with cB:
+        if st.button("✅ Émarger maintenant", key=f"quick_em_{auto_target_id}", use_container_width=True, type="primary"):
+            idx = df.index[df["__id"] == auto_target_id]
+            if len(idx):
+                i = idx[0]
+                df.at[i, "present"] = True
+                df.at[i, "checkin_time"] = now_paris_str()
+                df.at[i, "checkin_by"] = staff_name
+                st.session_state.df = df
+            st.rerun()
+
+    st.divider()
+
+# Pagination HAUT
 pager(page_count, st.session_state.page, label="top")
 
 start = (st.session_state.page - 1) * PAGE_SIZE
@@ -413,11 +485,13 @@ for _, row in view_page.iterrows():
     fu = row.get("function", "")
 
     cols = st.columns([2, 2, 3, 3, 3, 2, 2])
-    cols[0].write(fn)
-    cols[1].write(ln)
-    cols[2].write(em)
-    cols[3].write(co)
-    cols[4].write(fu)
+
+    cols[0].markdown(f"<div class='cell-nowrap'>{fn}</div>", unsafe_allow_html=True)
+    cols[1].markdown(f"<div class='cell-nowrap'>{ln}</div>", unsafe_allow_html=True)
+    cols[2].markdown(f"<div class='cell-nowrap'>{em}</div>", unsafe_allow_html=True)
+    cols[3].markdown(f"<div class='cell-nowrap'>{co}</div>", unsafe_allow_html=True)
+    cols[4].markdown(f"<div class='cell-nowrap'>{fu}</div>", unsafe_allow_html=True)
+
     cols[5].markdown(badge_html(is_present), unsafe_allow_html=True)
 
     if not is_present:
@@ -426,7 +500,7 @@ for _, row in view_page.iterrows():
             if len(idx):
                 i = idx[0]
                 df.at[i, "present"] = True
-                df.at[i, "checkin_time"] = now_paris_str()  # ✅ heure Paris
+                df.at[i, "checkin_time"] = now_paris_str()
                 df.at[i, "checkin_by"] = staff_name
                 st.session_state.df = df
             st.rerun()
@@ -441,7 +515,7 @@ for _, row in view_page.iterrows():
                 st.session_state.df = df
             st.rerun()
 
-# Pagination BAS (après la liste) -> évite de remonter
+# Pagination BAS
 pager(page_count, st.session_state.page, label="bottom")
 
 st.caption(f"Affichage : {start+1}-{min(end, total_rows)} / {total_rows}")
