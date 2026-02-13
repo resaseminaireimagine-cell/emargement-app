@@ -2,13 +2,11 @@ import io
 import re
 from pathlib import Path
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import streamlit as st
 import altair as alt
-
-import smtplib
-from email.message import EmailMessage
 
 
 # =========================
@@ -20,7 +18,7 @@ BG = "#F6F7FB"
 TEXT = "#111827"
 MUTED = "#6B7280"
 
-DEFAULT_TO_EMAIL = "evenements@institutimagine.org"
+PARIS_TZ = ZoneInfo("Europe/Paris")
 
 LOGO_CANDIDATES = [
     "logo_rose.png",
@@ -29,7 +27,6 @@ LOGO_CANDIDATES = [
     "logo.png",
 ]
 
-# Aliases robustes (FR/EN, variantes avec espaces)
 ALIASES = {
     "first_name": [
         "first_name", "firstname", "first name", "given name", "given_name",
@@ -42,6 +39,10 @@ ALIASES = {
     "email": ["email", "e-mail", "mail", "courriel"],
     "company": ["company", "societe", "société", "organisation", "organization", "structure"],
     "function": ["fonction", "function", "job", "poste", "title"],
+    # colonnes internes possibles si un fichier est déjà "enrichi"
+    "present": ["present", "présent", "présence", "presence"],
+    "checkin_time": ["checkin_time", "checkin time", "heure", "date", "datetime", "check-in time"],
+    "checkin_by": ["checkin_by", "checkin by", "agent", "émargé par", "emarge par", "checked in by"],
 }
 STANDARD_ORDER = ["first_name", "last_name", "email", "company", "function"]
 
@@ -49,12 +50,11 @@ STANDARD_ORDER = ["first_name", "last_name", "email", "company", "function"]
 # =========================
 # HELPERS
 # =========================
-def now_str() -> str:
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+def now_paris_str() -> str:
+    return datetime.now(PARIS_TZ).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def norm(s: str) -> str:
-    """Normalise les noms de colonnes (tabs, retours, espaces multiples, accents…)."""
     s = str(s)
     s = s.replace("\u00A0", " ")  # espace insécable
     s = s.replace("\t", " ")
@@ -73,6 +73,10 @@ def find_logo_path() -> str | None:
 
 
 def standardize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Renomme les colonnes selon ALIASES.
+    Ex: "First name" -> first_name ; "Last name" -> last_name ; etc.
+    """
     df = df.copy()
     original_cols = list(df.columns)
     norm_cols = {c: norm(c) for c in original_cols}
@@ -84,8 +88,11 @@ def standardize_columns(df: pd.DataFrame) -> pd.DataFrame:
         candidates_norm = set(norm(x) for x in candidates)
         for c in original_cols:
             nc = norm_cols[c]
-            # match direct OU match "commence par" (utile si Excel colle des trucs bizarres)
-            if (nc in candidates_norm or any(nc.startswith(cand) for cand in candidates_norm)) and std not in used_std:
+            if (
+                nc in candidates_norm
+                or any(nc.startswith(cand) for cand in candidates_norm)
+                or any(cand in nc for cand in candidates_norm)
+            ) and std not in used_std:
                 mapping[c] = std
                 used_std.add(std)
                 break
@@ -97,6 +104,9 @@ def ensure_internal_columns(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     if "present" not in df.columns:
         df["present"] = False
+    else:
+        # Normaliser en bool si l'excel contient "Oui/Non", "TRUE/FALSE", etc.
+        df["present"] = df["present"].apply(lambda x: str(x).strip().lower() in ["true", "1", "yes", "oui", "vrai"])
     if "checkin_time" not in df.columns:
         df["checkin_time"] = ""
     if "checkin_by" not in df.columns:
@@ -120,7 +130,7 @@ def load_excel(uploaded_file) -> pd.DataFrame:
     df = ensure_internal_columns(df)
     df = df.fillna("")
 
-    # ID unique par ligne -> pas de StreamlitDuplicateElementKey
+    # ID unique par ligne -> évite StreamlitDuplicateElementKey
     df["__base_id"] = df.apply(make_base_id, axis=1)
     df["__id"] = df["__base_id"] + "|row:" + df.index.astype(str)
     df = df.drop(columns=["__base_id"], errors="ignore")
@@ -154,59 +164,23 @@ def build_exports(df: pd.DataFrame) -> tuple[bytes, bytes, bytes]:
     return csv_all, csv_present, xlsx
 
 
-def smtp_config_available() -> tuple[bool, list[str]]:
-    required = ["SMTP_HOST", "SMTP_PORT", "SMTP_USER", "SMTP_PASS", "SMTP_FROM"]
-    missing = [k for k in required if k not in st.secrets]
-    return (len(missing) == 0), missing
-
-
-def smtp_send_email(to_addr: str, subject: str, body: str, attachment_bytes: bytes, filename: str) -> None:
-    msg = EmailMessage()
-    msg["From"] = st.secrets["SMTP_FROM"]
-    msg["To"] = to_addr
-    msg["Subject"] = subject
-    msg.set_content(body)
-
-    msg.add_attachment(
-        attachment_bytes,
-        maintype="application",
-        subtype="vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        filename=filename,
-    )
-
-    host = st.secrets["SMTP_HOST"]
-    port = int(st.secrets["SMTP_PORT"])
-    user = st.secrets["SMTP_USER"]
-    pwd = st.secrets["SMTP_PASS"]
-
-    if port == 465:
-        with smtplib.SMTP_SSL(host, port, timeout=25) as server:
-            server.login(user, pwd)
-            server.send_message(msg)
-    else:
-        with smtplib.SMTP(host, port, timeout=25) as server:
-            server.ehlo()
-            server.starttls()
-            server.ehlo()
-            server.login(user, pwd)
-            server.send_message(msg)
-
-
-def smtp_test_connection() -> None:
-    host = st.secrets["SMTP_HOST"]
-    port = int(st.secrets["SMTP_PORT"])
-    user = st.secrets["SMTP_USER"]
-    pwd = st.secrets["SMTP_PASS"]
-
-    if port == 465:
-        with smtplib.SMTP_SSL(host, port, timeout=15) as server:
-            server.login(user, pwd)
-    else:
-        with smtplib.SMTP(host, port, timeout=15) as server:
-            server.ehlo()
-            server.starttls()
-            server.ehlo()
-            server.login(user, pwd)
+def pager(page_count: int, page_value: int, label: str):
+    c_prev, c_info, c_next = st.columns([1, 2, 1], vertical_alignment="center")
+    with c_prev:
+        prev_disabled = page_value <= 1
+        if st.button("⬅️ Page précédente", disabled=prev_disabled, key=f"prev_{label}", use_container_width=True):
+            st.session_state.page = max(1, page_value - 1)
+            st.rerun()
+    with c_info:
+        st.markdown(
+            f"<div style='text-align:center; font-weight:800; padding:0.35rem 0;'>Page {page_value} / {page_count}</div>",
+            unsafe_allow_html=True,
+        )
+    with c_next:
+        next_disabled = page_value >= page_count
+        if st.button("Page suivante ➡️", disabled=next_disabled, key=f"next_{label}", use_container_width=True):
+            st.session_state.page = min(page_count, page_value + 1)
+            st.rerun()
 
 
 # =========================
@@ -214,6 +188,7 @@ def smtp_test_connection() -> None:
 # =========================
 st.set_page_config(page_title=APP_TITLE, layout="wide")
 
+# CSS global
 css = f"""
 <style>
 .stApp {{ background: {BG}; }}
@@ -243,6 +218,7 @@ h1, h2, h3, h4 {{ color: {TEXT}; }}
   padding: 0.75rem 1.05rem !important;
   font-weight: 800 !important;
   min-height: 46px !important;
+  white-space: nowrap !important;
 }}
 .stButton > button * {{ color: #ffffff !important; }}
 
@@ -250,12 +226,33 @@ button[kind="secondary"], .stButton > button[kind="secondary"] {{
   background: #ffffff !important;
   color: {PRIMARY} !important;
   border: 2px solid {PRIMARY} !important;
+  white-space: nowrap !important;
 }}
 button[kind="secondary"] * {{ color: {PRIMARY} !important; }}
 
+.badge-present {{
+  background:#DCFCE7; color:#166534; padding:6px 12px; border-radius:10px; font-weight:800;
+  display:inline-block; white-space:nowrap;
+}}
+.badge-todo {{
+  background:#F3F4F6; color:#374151; padding:6px 12px; border-radius:10px; font-weight:800;
+  display:inline-block; white-space:nowrap;
+}}
+
 @media (max-width: 980px) {{
   .block-container {{ padding-left: 1rem; padding-right: 1rem; }}
-  .stButton > button {{ min-height: 52px !important; font-size: 1.05rem !important; }}
+
+  /* Mode tablette : on réduit un peu la typo des badges et des boutons
+     pour éviter "À émarger" / "Émarger" coupés sur 2 lignes */
+  .badge-present, .badge-todo {{
+    font-size: 0.90rem;
+    padding: 6px 10px;
+  }}
+  .stButton > button {{
+    min-height: 52px !important;
+    font-size: 0.95rem !important;
+    padding: 0.70rem 0.90rem !important;
+  }}
   .stTextInput input {{ font-size: 1.05rem !important; }}
 }}
 </style>
@@ -269,10 +266,10 @@ logo_path = find_logo_path()
 c1, c2 = st.columns([1, 6], vertical_alignment="center")
 with c1:
     if logo_path:
-        st.image(logo_path, width=95)
+        st.image(logo_path, width=90)
 with c2:
     st.markdown(f"## {APP_TITLE}")
-    st.caption("Importez votre liste, recherchez un participant, émargez, puis exportez / envoyez la feuille d’émargement.")
+    st.caption("Importez votre liste, recherchez un participant, émargez, puis exportez la feuille d’émargement.")
 st.divider()
 
 # =========================
@@ -285,7 +282,7 @@ with st.sidebar:
     st.markdown("---")
     tablet_mode = st.toggle("Mode tablette (touch)", value=True)
     st.markdown("---")
-    to_email = st.text_input("Email de destination", value=DEFAULT_TO_EMAIL).strip()
+    st.caption("Fuseau horaire utilisé : **Europe/Paris** ✅")
 
 # =========================
 # UPLOAD
@@ -299,11 +296,12 @@ if uploaded is None:
 if "df" not in st.session_state or st.session_state.get("filename") != uploaded.name:
     st.session_state.df = load_excel(uploaded)
     st.session_state.filename = uploaded.name
+    st.session_state.page = 1  # reset pagination à chaque nouveau fichier
 
 df = st.session_state.df
 
 # =========================
-# DASHBOARD (camembert)
+# DASHBOARD
 # =========================
 total = len(df)
 present_count = int(df["present"].sum())
@@ -311,6 +309,7 @@ remaining = total - present_count
 
 st.subheader("Tableau de bord")
 
+# Camembert au-dessus des KPIs
 progress_df = pd.DataFrame({"Statut": ["Présents", "Restants"], "Nombre": [present_count, remaining]})
 donut = (
     alt.Chart(progress_df)
@@ -372,26 +371,36 @@ if "last_name" in view.columns and "first_name" in view.columns:
 PAGE_SIZE = 25 if tablet_mode else 50
 total_rows = len(view)
 page_count = max(1, (total_rows + PAGE_SIZE - 1) // PAGE_SIZE)
-page = st.number_input("Page", min_value=1, max_value=page_count, value=1, step=1)
-start = (page - 1) * PAGE_SIZE
+
+if "page" not in st.session_state:
+    st.session_state.page = 1
+st.session_state.page = min(max(1, st.session_state.page), page_count)
+
+# Pagination HAUT (avant la liste)
+pager(page_count, st.session_state.page, label="top")
+
+start = (st.session_state.page - 1) * PAGE_SIZE
 end = start + PAGE_SIZE
 view_page = view.iloc[start:end].copy()
 
+# =========================
+# LIST
+# =========================
 st.subheader("Liste des participants")
 
-h = st.columns([2, 2, 3, 3, 3, 2, 2])
-h[0].markdown("**Prénom**")
-h[1].markdown("**Nom**")
-h[2].markdown("**Email**")
-h[3].markdown("**Société**")
-h[4].markdown("**Fonction**")
-h[5].markdown("**Statut**")
-h[6].markdown("**Action**")
+header = st.columns([2, 2, 3, 3, 3, 2, 2])
+header[0].markdown("**Prénom**")
+header[1].markdown("**Nom**")
+header[2].markdown("**Email**")
+header[3].markdown("**Société**")
+header[4].markdown("**Fonction**")
+header[5].markdown("**Statut**")
+header[6].markdown("**Action**")
 
-def badge(is_present: bool) -> str:
+def badge_html(is_present: bool) -> str:
     if is_present:
-        return "<span style='background:#DCFCE7;color:#166534;padding:6px 12px;border-radius:10px;font-weight:800;'>✔ Présent</span>"
-    return "<span style='background:#F3F4F6;color:#374151;padding:6px 12px;border-radius:10px;font-weight:800;'>À émarger</span>"
+        return "<span class='badge-present'>✔ Présent</span>"
+    return "<span class='badge-todo'>À émarger</span>"
 
 for _, row in view_page.iterrows():
     rid = row["__id"]
@@ -409,7 +418,7 @@ for _, row in view_page.iterrows():
     cols[2].write(em)
     cols[3].write(co)
     cols[4].write(fu)
-    cols[5].markdown(badge(is_present), unsafe_allow_html=True)
+    cols[5].markdown(badge_html(is_present), unsafe_allow_html=True)
 
     if not is_present:
         if cols[6].button("Émarger", key=f"em_{rid}", use_container_width=True, type="primary"):
@@ -417,7 +426,7 @@ for _, row in view_page.iterrows():
             if len(idx):
                 i = idx[0]
                 df.at[i, "present"] = True
-                df.at[i, "checkin_time"] = now_str()
+                df.at[i, "checkin_time"] = now_paris_str()  # ✅ heure Paris
                 df.at[i, "checkin_by"] = staff_name
                 st.session_state.df = df
             st.rerun()
@@ -432,12 +441,15 @@ for _, row in view_page.iterrows():
                 st.session_state.df = df
             st.rerun()
 
+# Pagination BAS (après la liste) -> évite de remonter
+pager(page_count, st.session_state.page, label="bottom")
+
 st.caption(f"Affichage : {start+1}-{min(end, total_rows)} / {total_rows}")
 
 st.divider()
 
 # =========================
-# EXPORTS + EMAIL
+# EXPORTS
 # =========================
 st.subheader("Exports")
 
@@ -445,72 +457,26 @@ csv_all, csv_present, xlsx_all = build_exports(df)
 
 e1, e2, e3 = st.columns([1, 1, 1], vertical_alignment="center")
 with e1:
-    st.download_button("⬇️ CSV (Excel FR)", data=csv_all, file_name="emargement_export.csv",
-                       mime="text/csv", use_container_width=True)
+    st.download_button(
+        "⬇️ CSV (Excel FR)",
+        data=csv_all,
+        file_name="emargement_export.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
 with e2:
-    st.download_button("⬇️ CSV (présents)", data=csv_present, file_name="emargement_presents.csv",
-                       mime="text/csv", use_container_width=True)
+    st.download_button(
+        "⬇️ CSV (présents)",
+        data=csv_present,
+        file_name="emargement_presents.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
 with e3:
-    st.download_button("⬇️ Excel (.xlsx)", data=xlsx_all, file_name="emargement_export.xlsx",
-                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                       use_container_width=True)
-
-st.markdown("### Envoi par email")
-ok_smtp, missing = smtp_config_available()
-
-if not ok_smtp:
-    st.warning("SMTP non configuré : les boutons restent cliquables, mais l’envoi échouera tant que les secrets ne sont pas remplis.")
-    st.caption("Il manque : " + ", ".join(missing))
-    with st.expander("Configurer l’envoi email (Secrets Streamlit)"):
-        st.code(
-            'SMTP_HOST="smtp.votre-domaine.org"\n'
-            'SMTP_PORT="587"  # ou 465 si SSL\n'
-            'SMTP_USER="compte_smtp@institutimagine.org"\n'
-            'SMTP_PASS="mot_de_passe_ou_app_password"\n'
-            'SMTP_FROM="evenements@institutimagine.org"\n',
-            language="toml",
-        )
-
-subject_default = f"[Institut Imagine] Export émargement — {datetime.now().strftime('%d/%m/%Y %H:%M')}"
-email_subject = st.text_input("Objet", value=subject_default)
-email_body = st.text_area(
-    "Message",
-    value="Bonjour,\n\nVeuillez trouver en pièce jointe l’export d’émargement (Excel).\n\nCordialement,\nInstitut Imagine",
-    height=120,
-)
-
-b1, b2 = st.columns([1, 2], vertical_alignment="center")
-
-with b1:
-    if st.button("🧪 Tester SMTP", use_container_width=True):
-        if not ok_smtp:
-            st.error("SMTP non configuré : ajoute les secrets dans Streamlit Cloud (Manage app → Settings → Secrets).")
-        else:
-            try:
-                smtp_test_connection()
-                st.success("Connexion SMTP OK (authentification réussie).")
-            except Exception as e:
-                st.error("Test SMTP échoué (réseau/port/identifiants).")
-                st.caption(repr(e))
-
-with b2:
-    if st.button("📧 Envoyer l’export à evenements@institutimagine.org", use_container_width=True):
-        if not ok_smtp:
-            st.error("SMTP non configuré : ajoute les secrets dans Streamlit Cloud (Manage app → Settings → Secrets).")
-        else:
-            try:
-                smtp_send_email(
-                    to_addr=to_email or DEFAULT_TO_EMAIL,
-                    subject=email_subject,
-                    body=email_body,
-                    attachment_bytes=xlsx_all,
-                    filename="emargement_export.xlsx",
-                )
-                st.success(f"Email envoyé à {to_email or DEFAULT_TO_EMAIL}")
-            except Exception as e:
-                st.error("Échec de l’envoi email.")
-                st.caption(repr(e))
-                st.info(
-                    "Si tu es sur Streamlit Cloud : le SMTP interne de l’institut peut être bloqué. "
-                    "Dans ce cas, il faut un SMTP accessible publiquement (ou un relais autorisé)."
-                )
+    st.download_button(
+        "⬇️ Excel (.xlsx)",
+        data=xlsx_all,
+        file_name="emargement_export.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+    )
