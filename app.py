@@ -13,7 +13,7 @@ import altair as alt
 # =========================
 # CONFIG
 # =========================
-APP_TITLE = "Outil d’émargement — Institut Imagine"
+APP_TITLE = "Table d’émargement — Institut Imagine"
 PRIMARY = "#C4007A"   # rose Imagine
 BG = "#F6F7FB"
 TEXT = "#111827"
