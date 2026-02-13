@@ -7,7 +7,6 @@ import pandas as pd
 import streamlit as st
 import altair as alt
 
-# Email (optionnel, activé uniquement si SMTP est configuré dans Secrets)
 import smtplib
 from email.message import EmailMessage
 
@@ -16,7 +15,7 @@ from email.message import EmailMessage
 # CONFIG
 # =========================
 APP_TITLE = "Outil d’émargement — Institut Imagine"
-PRIMARY = "#C4007A"  # rose Imagine
+PRIMARY = "#C4007A"   # rose Imagine
 BG = "#F6F7FB"
 TEXT = "#111827"
 MUTED = "#6B7280"
@@ -30,7 +29,6 @@ LOGO_CANDIDATES = [
     "logo.png",
 ]
 
-# Excel column mapping
 ALIASES = {
     "first_name": ["first_name", "firstname", "prenom", "prénom", "given name", "given_name"],
     "last_name":  ["last_name", "lastname", "nom", "surname", "family name", "family_name"],
@@ -69,14 +67,12 @@ def standardize_columns(df: pd.DataFrame) -> pd.DataFrame:
 
     mapping = {}
     used_std = set()
-
     for std, candidates in ALIASES.items():
         for c in original_cols:
             if norm_cols[c] in candidates and std not in used_std:
                 mapping[c] = std
                 used_std.add(std)
                 break
-
     return df.rename(columns=mapping)
 
 
@@ -141,12 +137,13 @@ def build_exports(df: pd.DataFrame) -> tuple[bytes, bytes, bytes]:
     return csv_all, csv_present, xlsx
 
 
-def smtp_config_available() -> bool:
+def smtp_config_available() -> tuple[bool, list[str]]:
     required = ["SMTP_HOST", "SMTP_PORT", "SMTP_USER", "SMTP_PASS", "SMTP_FROM"]
-    return all(k in st.secrets for k in required)
+    missing = [k for k in required if k not in st.secrets]
+    return (len(missing) == 0), missing
 
 
-def send_email_with_attachment(to_addr: str, subject: str, body: str, attachment_bytes: bytes, filename: str) -> None:
+def smtp_send_email(to_addr: str, subject: str, body: str, attachment_bytes: bytes, filename: str) -> None:
     msg = EmailMessage()
     msg["From"] = st.secrets["SMTP_FROM"]
     msg["To"] = to_addr
@@ -165,10 +162,35 @@ def send_email_with_attachment(to_addr: str, subject: str, body: str, attachment
     user = st.secrets["SMTP_USER"]
     pwd = st.secrets["SMTP_PASS"]
 
-    with smtplib.SMTP(host, port, timeout=20) as server:
-        server.starttls()
-        server.login(user, pwd)
-        server.send_message(msg)
+    # Port 465 => SSL direct, sinon STARTTLS (587 généralement)
+    if port == 465:
+        with smtplib.SMTP_SSL(host, port, timeout=25) as server:
+            server.login(user, pwd)
+            server.send_message(msg)
+    else:
+        with smtplib.SMTP(host, port, timeout=25) as server:
+            server.ehlo()
+            server.starttls()
+            server.ehlo()
+            server.login(user, pwd)
+            server.send_message(msg)
+
+
+def smtp_test_connection() -> None:
+    host = st.secrets["SMTP_HOST"]
+    port = int(st.secrets["SMTP_PORT"])
+    user = st.secrets["SMTP_USER"]
+    pwd = st.secrets["SMTP_PASS"]
+
+    if port == 465:
+        with smtplib.SMTP_SSL(host, port, timeout=15) as server:
+            server.login(user, pwd)
+    else:
+        with smtplib.SMTP(host, port, timeout=15) as server:
+            server.ehlo()
+            server.starttls()
+            server.ehlo()
+            server.login(user, pwd)
 
 
 # =========================
@@ -176,7 +198,7 @@ def send_email_with_attachment(to_addr: str, subject: str, body: str, attachment
 # =========================
 st.set_page_config(page_title=APP_TITLE, layout="wide")
 
-# CSS (tablette + contrastes)
+# CSS (tablette + contrastes + boutons)
 css = f"""
 <style>
 .stApp {{ background: {BG}; }}
@@ -207,11 +229,19 @@ h1, h2, h3, h4 {{ color: {TEXT}; }}
   font-weight: 800 !important;
   min-height: 46px !important;
 }}
+/* Blindage: certains thèmes mettent le texte en gris => on force */
+.stButton > button * {{
+  color: #ffffff !important;
+}}
 
 button[kind="secondary"], .stButton > button[kind="secondary"] {{
   background: #ffffff !important;
   color: {PRIMARY} !important;
   border: 2px solid {PRIMARY} !important;
+}}
+/* Texte secondary (Annuler) */
+button[kind="secondary"] * {{
+  color: {PRIMARY} !important;
 }}
 
 @media (max-width: 980px) {{
@@ -230,11 +260,10 @@ logo_path = find_logo_path()
 c1, c2 = st.columns([1, 6], vertical_alignment="center")
 with c1:
     if logo_path:
-        st.image(logo_path, width=110)
+        st.image(logo_path, width=95)  # un poil plus compact
 with c2:
     st.markdown(f"## {APP_TITLE}")
     st.caption("Importez votre liste, recherchez un participant, émargez, puis exportez / envoyez la feuille d’émargement.")
-
 st.divider()
 
 # =========================
@@ -265,12 +294,32 @@ if "df" not in st.session_state or st.session_state.get("filename") != uploaded.
 df = st.session_state.df
 
 # =========================
-# KPIs + SEARCH + FILTERS
+# DASHBOARD (camembert SEUL)
 # =========================
 total = len(df)
 present_count = int(df["present"].sum())
 remaining = total - present_count
 
+st.subheader("Tableau de bord")
+
+progress_df = pd.DataFrame({"Statut": ["Présents", "Restants"], "Nombre": [present_count, remaining]})
+donut = (
+    alt.Chart(progress_df)
+    .mark_arc(innerRadius=70)
+    .encode(
+        theta=alt.Theta("Nombre:Q"),
+        color=alt.Color("Statut:N", legend=alt.Legend(title=None)),
+        tooltip=["Statut:N", "Nombre:Q"],
+    )
+    .properties(height=240)
+)
+st.altair_chart(donut, use_container_width=True)
+
+st.divider()
+
+# =========================
+# KPIs + SEARCH + FILTERS (camembert AU DESSUS ✅)
+# =========================
 k1, k2, k3, k4 = st.columns([1, 1, 1, 2], vertical_alignment="center")
 k1.metric("Participants", total)
 k2.metric("Présents", present_count)
@@ -285,67 +334,6 @@ with f2:
     show_present_only = st.checkbox("Présents uniquement", value=False)
 with f3:
     st.caption("Affichage optimisé : 1 ligne = 1 participant")
-
-# =========================
-# DASHBOARD / CHARTS
-# =========================
-st.subheader("Tableau de bord")
-
-d1, d2 = st.columns([1, 1], vertical_alignment="top")
-
-with d1:
-    progress_df = pd.DataFrame({"Statut": ["Présents", "Restants"], "Nombre": [present_count, remaining]})
-    donut = (
-        alt.Chart(progress_df)
-        .mark_arc(innerRadius=70)
-        .encode(
-            theta=alt.Theta("Nombre:Q"),
-            color=alt.Color("Statut:N", legend=alt.Legend(title=None)),
-            tooltip=["Statut:N", "Nombre:Q"],
-        )
-        .properties(height=220)
-    )
-    st.altair_chart(donut, use_container_width=True)
-
-with d2:
-    tmp = df[df["present"] == True].copy()
-    tmp["checkin_time_dt"] = pd.to_datetime(tmp["checkin_time"], errors="coerce")
-    tmp = tmp.dropna(subset=["checkin_time_dt"])
-    if len(tmp):
-        tmp["minute"] = tmp["checkin_time_dt"].dt.floor("min")
-        t = tmp.groupby("minute").size().reset_index(name="Arrivées").sort_values("minute")
-        line = (
-            alt.Chart(t)
-            .mark_line(point=True)
-            .encode(
-                x=alt.X("minute:T", title="Heure"),
-                y=alt.Y("Arrivées:Q", title="Arrivées / minute"),
-                tooltip=[alt.Tooltip("minute:T", title="Heure"), "Arrivées:Q"],
-            )
-            .properties(height=220)
-        )
-        st.altair_chart(line, use_container_width=True)
-    else:
-        st.caption("Aucun émargement pour l’instant (le graphique apparaîtra dès les premières arrivées).")
-
-if "company" in df.columns:
-    st.caption("Top sociétés (présents)")
-    tmp = df[df["present"] == True].copy()
-    if len(tmp):
-        top = tmp.groupby("company").size().reset_index(name="Présents").sort_values("Présents", ascending=False).head(10)
-        bar = (
-            alt.Chart(top)
-            .mark_bar()
-            .encode(
-                y=alt.Y("company:N", sort="-x", title=None),
-                x=alt.X("Présents:Q", title="Présents"),
-                tooltip=["company:N", "Présents:Q"],
-            )
-            .properties(height=260)
-        )
-        st.altair_chart(bar, use_container_width=True)
-    else:
-        st.caption("Pas encore de présents → le top sociétés s’affichera ensuite.")
 
 st.divider()
 
@@ -460,7 +448,20 @@ with e3:
                        use_container_width=True)
 
 st.markdown("### Envoi par email")
-st.caption("Le bouton s’active uniquement si la configuration SMTP est renseignée dans Streamlit Secrets.")
+ok_smtp, missing = smtp_config_available()
+
+if not ok_smtp:
+    st.warning("SMTP non configuré → bouton d’envoi désactivé.")
+    st.caption("Il manque : " + ", ".join(missing))
+    with st.expander("Configurer l’envoi email (Secrets Streamlit)"):
+        st.code(
+            'SMTP_HOST="smtp.votre-domaine.org"\n'
+            'SMTP_PORT="587"  # ou 465 si SSL\n'
+            'SMTP_USER="compte_smtp@institutimagine.org"\n'
+            'SMTP_PASS="mot_de_passe_ou_app_password"\n'
+            'SMTP_FROM="evenements@institutimagine.org"\n',
+            language="toml",
+        )
 
 subject_default = f"[Institut Imagine] Export émargement — {datetime.now().strftime('%d/%m/%Y %H:%M')}"
 email_subject = st.text_input("Objet", value=subject_default)
@@ -470,28 +471,33 @@ email_body = st.text_area(
     height=120,
 )
 
-can_send = smtp_config_available()
-if st.button("📧 Envoyer l’export à evenements@institutimagine.org", use_container_width=True, disabled=not can_send):
-    try:
-        send_email_with_attachment(
-            to_addr=to_email or DEFAULT_TO_EMAIL,
-            subject=email_subject,
-            body=email_body,
-            attachment_bytes=xlsx_all,
-            filename="emargement_export.xlsx",
-        )
-        st.success(f"Email envoyé à {to_email or DEFAULT_TO_EMAIL}")
-    except Exception as e:
-        st.error("Échec de l’envoi email. Vérifiez la config SMTP dans Secrets.")
-        st.caption(str(e))
+b1, b2 = st.columns([1, 2], vertical_alignment="center")
 
-if not can_send:
-    with st.expander("Configurer l’envoi email (SMTP)"):
-        st.code(
-            'SMTP_HOST="smtp.votre-domaine.org"\n'
-            'SMTP_PORT="587"\n'
-            'SMTP_USER="compte_smtp@institutimagine.org"\n'
-            'SMTP_PASS="mot_de_passe_ou_app_password"\n'
-            'SMTP_FROM="evenements@institutimagine.org"\n',
-            language="toml",
-        )
+with b1:
+    if st.button("🧪 Tester SMTP", use_container_width=True, disabled=not ok_smtp):
+        try:
+            smtp_test_connection()
+            st.success("Connexion SMTP OK (authentification réussie).")
+        except Exception as e:
+            st.error("Test SMTP échoué. (Très probablement réseau/port/identifiants)")
+            st.caption(repr(e))
+
+with b2:
+    if st.button("📧 Envoyer l’export à evenements@institutimagine.org", use_container_width=True, disabled=not ok_smtp):
+        try:
+            smtp_send_email(
+                to_addr=to_email or DEFAULT_TO_EMAIL,
+                subject=email_subject,
+                body=email_body,
+                attachment_bytes=xlsx_all,
+                filename="emargement_export.xlsx",
+            )
+            st.success(f"Email envoyé à {to_email or DEFAULT_TO_EMAIL}")
+        except Exception as e:
+            st.error("Échec de l’envoi email. Regarde l’erreur ci-dessous.")
+            st.caption(repr(e))
+            st.info(
+                "Si tu es sur Streamlit Cloud : ton SMTP d’entreprise peut être inaccessible (pare-feu). "
+                "Dans ce cas, il faut soit un SMTP accessible publiquement (ex: Gmail/SendGrid), "
+                "soit un relais SMTP externe autorisé."
+            )
