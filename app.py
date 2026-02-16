@@ -550,8 +550,9 @@ if auto_target_id:
 # =========================
 # PAGINATION
 # =========================
+PAGE_SIZE_OPTIONS = [25, 50, 75, 100]
+
 # Choix du nombre de participants par page
-# (par défaut : 25 en tablette, 50 sur desktop)
 default_page_size = 25 if tablet_mode else 50
 if default_page_size not in PAGE_SIZE_OPTIONS:
     default_page_size = PAGE_SIZE_OPTIONS[0]
@@ -562,6 +563,12 @@ PAGE_SIZE = st.selectbox(
     index=PAGE_SIZE_OPTIONS.index(default_page_size),
     key="page_size",
 )
+
+# Si on change la taille de page, on revient page 1
+prev_ps = st.session_state.get("_prev_page_size", PAGE_SIZE)
+if PAGE_SIZE != prev_ps:
+    st.session_state.page = 1
+st.session_state["_prev_page_size"] = PAGE_SIZE
 
 total_rows = len(view)
 page_count = max(1, (total_rows + PAGE_SIZE - 1) // PAGE_SIZE)
@@ -575,12 +582,6 @@ pager(page_count, st.session_state.page, label="top")
 start = (st.session_state.page - 1) * PAGE_SIZE
 end = start + PAGE_SIZE
 view_page = view.iloc[start:end].copy()
-
-# Si on change la taille de page, on revient page 1
-prev_ps = st.session_state.get("_prev_page_size", PAGE_SIZE)
-if PAGE_SIZE != prev_ps:
-    st.session_state.page = 1
-st.session_state["_prev_page_size"] = PAGE_SIZE
 
 # =========================
 # LIST
