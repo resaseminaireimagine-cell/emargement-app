@@ -1,10 +1,15 @@
 # app.py
 import io
 import re
+import os
+import ssl
+import smtplib
 import hashlib
+import unicodedata
 from pathlib import Path
 from datetime import datetime
 from zoneinfo import ZoneInfo
+from email.message import EmailMessage
 
 import pandas as pd
 import streamlit as st
@@ -31,6 +36,8 @@ LOGO_CANDIDATES = [
     "LOGO ROSE.png",
     "LOGO_ROSE.png",
     "logo.png",
+    "LOGO ROSE.png",  # ton repo
+    "LOGO ROSE.png".lower(),
 ]
 
 ALIASES = {
@@ -53,23 +60,44 @@ STANDARD_ORDER = ["first_name", "last_name", "email", "company", "function"]
 
 PRESENT_TRUE = {"true", "1", "yes", "oui", "vrai", "x", "present", "présent"}
 
+MAIL_TO = "evenements@institutimagine.org"
+
 
 # =========================
 # HELPERS
 # =========================
 def now_paris_str() -> str:
-    # ISO-like, stable, easy to parse
     return datetime.now(PARIS_TZ).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def norm(s: str) -> str:
     s = "" if s is None else str(s)
     s = s.replace("\u00A0", " ")
-    s = s.replace("\t", " ")
-    s = s.replace("\n", " ")
+    s = s.replace("\t", " ").replace("\n", " ")
     s = s.strip().lower()
     s = re.sub(r"\s+", " ", s)
     return s
+
+
+def fold_text(s: str) -> str:
+    """Minuscule + sans accents + alphanum/espaces normalisés (recherche robuste)."""
+    s = "" if s is None else str(s)
+    s = s.replace("\u00A0", " ")
+    s = s.replace("\t", " ").replace("\n", " ")
+    s = s.strip().lower()
+
+    s = unicodedata.normalize("NFKD", s)
+    s = "".join(ch for ch in s if not unicodedata.combining(ch))
+
+    s = re.sub(r"[’'`´-]+", " ", s)
+    s = re.sub(r"[^a-z0-9 ]+", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+def query_tokens(q: str) -> list[str]:
+    qf = fold_text(q)
+    return [t for t in qf.split(" ") if t]
 
 
 def find_logo_path() -> str | None:
@@ -131,6 +159,15 @@ def ensure_internal_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def sanitize_df(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df = df.fillna("")
+    for c in ["first_name", "last_name", "email", "company", "function", "checkin_time", "checkin_by", "__base_id"]:
+        if c in df.columns:
+            df[c] = df[c].astype(str).replace("nan", "")
+    return df
+
+
 def make_base_id(row: pd.Series) -> str:
     email = norm(row.get("email", ""))
     if email and email != "nan":
@@ -145,19 +182,7 @@ def add_ids(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     if "__base_id" not in df.columns:
         df["__base_id"] = df.apply(make_base_id, axis=1)
-    # __id unique pour les keys UI (doit être unique même si base_id dupliqué)
-    # On conserve l'index courant : suffisant car __id est recalculé après (re)load/autosave.
     df["__id"] = df["__base_id"] + "|row:" + df.index.astype(str)
-    return df
-
-
-def sanitize_df(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-    df = df.fillna("")
-    # Assure des strings dans les colonnes texte pour éviter surprises (NaN, numbers)
-    for c in ["first_name", "last_name", "email", "company", "function", "checkin_time", "checkin_by", "__base_id"]:
-        if c in df.columns:
-            df[c] = df[c].astype(str).replace("nan", "")
     return df
 
 
@@ -201,7 +226,6 @@ def load_excel(uploaded_file) -> pd.DataFrame:
 
 
 def build_search_blob(df: pd.DataFrame, cols: list[str]) -> pd.Series:
-    # Vectorisé: concat des colonnes en une fois
     parts = []
     for c in cols:
         if c in df.columns:
@@ -211,7 +235,60 @@ def build_search_blob(df: pd.DataFrame, cols: list[str]) -> pd.Series:
     blob = parts[0]
     for p in parts[1:]:
         blob = blob + " " + p
-    return blob.str.lower()
+    return blob.map(fold_text)
+
+
+def relevance_score_row(row: pd.Series, q: str) -> int:
+    toks = query_tokens(q)
+    if not toks:
+        return 0
+
+    fn = fold_text(row.get("first_name", ""))
+    ln = fold_text(row.get("last_name", ""))
+    em = fold_text(row.get("email", ""))
+    co = fold_text(row.get("company", ""))
+    fu = fold_text(row.get("function", ""))
+
+    score = 0
+    full_name = (fn + " " + ln).strip()
+    rev_name = (ln + " " + fn).strip()
+    qf = " ".join(toks)
+
+    if qf and (qf == full_name or qf == rev_name):
+        score += 250
+
+    for t in toks:
+        if t == em:
+            score += 200
+        if t == ln:
+            score += 120
+        if t == fn:
+            score += 100
+
+        if ln.startswith(t):
+            score += 90
+        if fn.startswith(t):
+            score += 70
+        if em.startswith(t):
+            score += 60
+        if co.startswith(t):
+            score += 40
+
+        if t in ln:
+            score += 50
+        if t in fn:
+            score += 35
+        if t in em:
+            score += 30
+        if t in co:
+            score += 20
+        if t in fu:
+            score += 10
+
+    if not bool(row.get("present", False)):
+        score += 5
+
+    return score
 
 
 def build_exports(df: pd.DataFrame) -> tuple[bytes, bytes, bytes]:
@@ -247,55 +324,48 @@ def pager(page_count: int, page_value: int, label: str):
             st.rerun()
 
 
-def relevance_score_row(row: pd.Series, q: str) -> int:
-    if not q:
-        return 0
-    q = q.strip().lower()
-
-    fn = norm(row.get("first_name", ""))
-    ln = norm(row.get("last_name", ""))
-    em = norm(row.get("email", ""))
-    co = norm(row.get("company", ""))
-    fu = norm(row.get("function", ""))
-
-    score = 0
-    if q == em:
-        score += 200
-    if q == ln:
-        score += 140
-    if q == fn:
-        score += 120
-
-    if ln.startswith(q):
-        score += 110
-    if fn.startswith(q):
-        score += 90
-    if em.startswith(q):
-        score += 80
-    if co.startswith(q):
-        score += 50
-
-    if q in ln:
-        score += 60
-    if q in fn:
-        score += 45
-    if q in em:
-        score += 35
-    if q in co:
-        score += 25
-    if q in fu:
-        score += 10
-
-    if not bool(row.get("present", False)):
-        score += 5
-
-    return score
-
-
 def badge_html(is_present: bool) -> str:
     if is_present:
         return "<span class='badge-present'>✔ Présent</span>"
     return "<span class='badge-todo'>À émarger</span>"
+
+
+def send_email_with_attachments(
+    smtp_host: str,
+    smtp_port: int,
+    smtp_user: str,
+    smtp_password: str,
+    mail_from: str,
+    to_addr: str,
+    subject: str,
+    body: str,
+    attachments: list[tuple[str, bytes, str]],
+) -> tuple[bool, str]:
+    """
+    Envoie un email via SMTP.
+    attachments: list of (filename, data_bytes, mime_type)
+    """
+    msg = EmailMessage()
+    msg["From"] = mail_from
+    msg["To"] = to_addr
+    msg["Subject"] = subject
+    msg.set_content(body)
+
+    for filename, data, mime in attachments:
+        maintype, subtype = mime.split("/", 1)
+        msg.add_attachment(data, maintype=maintype, subtype=subtype, filename=filename)
+
+    context = ssl.create_default_context()
+    try:
+        with smtplib.SMTP(smtp_host, smtp_port, timeout=15) as server:
+            server.ehlo()
+            server.starttls(context=context)
+            server.ehlo()
+            server.login(smtp_user, smtp_password)
+            server.send_message(msg)
+        return True, "Email envoyé."
+    except Exception as e:
+        return False, f"Échec d’envoi : {e}"
 
 
 # =========================
@@ -307,15 +377,22 @@ css = f"""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@400;600;700;800;900&display=swap');
 
-.stApp {{
-  background: {BG};
-  font-family: 'Montserrat', sans-serif !important;
+:root {{
+  --font: 'Montserrat', sans-serif;
 }}
 
-html, body, [class*="css"] {{
-  font-family: 'Montserrat', sans-serif !important;
+html, body, .stApp, [class*="css"] {{
+  font-family: var(--font) !important;
 }}
 
+h1, h2, h3, h4, h5, h6,
+.stMarkdown, .stMarkdown *,
+.stCaption, small, p, label, span, div,
+button, input, textarea {{
+  font-family: var(--font) !important;
+}}
+
+.stApp {{ background: {BG}; }}
 .block-container {{ padding-top: 1.1rem; max-width: 1280px; }}
 h1, h2, h3, h4 {{ color: {TEXT}; }}
 .stCaption, small, p {{ color: {MUTED}; }}
@@ -363,7 +440,6 @@ button[kind="secondary"] * {{ color: {PRIMARY} !important; }}
   display:inline-block; white-space:nowrap;
 }}
 
-/* Nom complet : pas de retour à la ligne, pas d'ellipsis */
 .cell-nowrap {{
   white-space: nowrap !important;
   overflow: visible !important;
@@ -414,6 +490,16 @@ with st.sidebar:
     st.caption("Fuseau horaire : **Europe/Paris**")
     st.caption("Autosauvegarde automatique")
 
+    st.markdown("---")
+    st.subheader("Envoi par email (option)")
+    st.caption("Renseigne les variables d'environnement SMTP côté machine/serveur.")
+    smtp_host = st.text_input("SMTP_HOST", value=os.getenv("SMTP_HOST", "")).strip()
+    smtp_port = int(os.getenv("SMTP_PORT", "587"))
+    smtp_port = st.number_input("SMTP_PORT", min_value=1, max_value=65535, value=smtp_port, step=1)
+    smtp_user = st.text_input("SMTP_USER", value=os.getenv("SMTP_USER", "")).strip()
+    smtp_password = st.text_input("SMTP_PASSWORD", value=os.getenv("SMTP_PASSWORD", ""), type="password")
+    mail_from = st.text_input("MAIL_FROM", value=os.getenv("MAIL_FROM", smtp_user or ""), help="Ex: evenements@institutimagine.org")
+
 # =========================
 # UPLOAD + AUTO-RESTORE
 # =========================
@@ -425,7 +511,6 @@ if uploaded is None:
 
 file_hash = hash_uploaded_file(uploaded)
 
-# (re)charger si nouveau fichier
 if "file_hash" not in st.session_state or st.session_state.get("file_hash") != file_hash:
     st.session_state.file_hash = file_hash
     st.session_state.filename = uploaded.name
@@ -483,9 +568,9 @@ k3.metric("Restants", remaining)
 with k4:
     query = st.text_input(
         "Recherche",
-        placeholder="Nom, prénom, email, société…",
+        placeholder="Nom, prénom, email, société… (accents ignorés)",
         key="search_query",
-    ).strip().lower()
+    ).strip()
 
 prev_q = st.session_state.get("_prev_query", "")
 if query != prev_q:
@@ -498,7 +583,7 @@ with f1:
 with f2:
     show_present_only = st.checkbox("Présents uniquement", value=False)
 with f3:
-    st.caption("La recherche remonte automatiquement les meilleurs résultats.")
+    st.caption("Astuce : tape 'dupont jean' (ordre libre), accents/apostrophes ignorés.")
 
 st.divider()
 
@@ -514,20 +599,21 @@ if not display_cols:
 
 search_cols = list(dict.fromkeys(display_cols + [c for c in ["email", "company", "function"] if c in df.columns]))
 
-# Precompute search blob once per loaded df (keep in session_state)
+# Build search blob once
 if "_search_blob" not in df.columns:
     df["_search_blob"] = build_search_blob(df, search_cols)
-    st.session_state.df = df  # persist
-    autosave_df(df, file_hash)  # keep autosave aligned
+    st.session_state.df = df
+    autosave_df(df, file_hash)
 
 view = df.copy()
 
-if query:
-    # Fast filter via blob
-    q_esc = re.escape(query)
-    mask = view["_search_blob"].str.contains(q_esc, na=False, regex=True)
+if query.strip():
+    toks = query_tokens(query)
+    mask = pd.Series(True, index=view.index)
+    for t in toks:
+        mask &= view["_search_blob"].str.contains(re.escape(t), na=False, regex=True)
     view = view[mask].copy()
-    # Score only on filtered subset
+
     view["_score"] = view.apply(lambda r: relevance_score_row(r, query), axis=1)
     view = view.sort_values(by=["_score"], ascending=False, kind="stable")
 else:
@@ -539,9 +625,9 @@ if show_present_only:
 elif only_not_present:
     view = view[view["present"] == False].copy()
 
-# Auto-cible : si 1 seul résultat non émargé
+# Auto-target if single non-present result
 auto_target_id = None
-if query:
+if query.strip():
     candidates = view[view["present"] == False]
     if len(candidates) == 1:
         auto_target_id = candidates.iloc[0]["__id"]
@@ -719,3 +805,70 @@ with e3:
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True,
     )
+
+st.divider()
+
+# =========================
+# EMAIL EXPORTS
+# =========================
+st.subheader("Envoyer les exports par email")
+
+export_df = df.drop(columns=["__id"], errors="ignore").copy()
+present_only = export_df[export_df["present"] == True].copy()
+not_present_only = export_df[export_df["present"] == False].copy()
+
+csv_present_bytes = present_only.to_csv(index=False, sep=";", encoding="utf-8-sig").encode("utf-8-sig")
+csv_not_present_bytes = not_present_only.to_csv(index=False, sep=";", encoding="utf-8-sig").encode("utf-8-sig")
+
+colA, colB = st.columns([2, 1], vertical_alignment="center")
+with colA:
+    st.caption(f"Envoi vers : **{MAIL_TO}** (2 pièces jointes : présents + non émargés).")
+with colB:
+    send_now = st.button("📧 Envoyer maintenant", use_container_width=True, type="primary")
+
+if send_now:
+    # Validation minimale
+    missing = []
+    if not smtp_host:
+        missing.append("SMTP_HOST")
+    if not smtp_user:
+        missing.append("SMTP_USER")
+    if not smtp_password:
+        missing.append("SMTP_PASSWORD")
+    if not mail_from:
+        missing.append("MAIL_FROM")
+    if missing:
+        st.error("Config SMTP manquante : " + ", ".join(missing))
+    else:
+        ts = datetime.now(PARIS_TZ).strftime("%Y-%m-%d_%H%M")
+        subject = f"[Émargement] Exports présents / non émargés — {st.session_state.get('filename','liste')} — {ts}"
+        body = (
+            "Bonjour,\n\n"
+            "Veuillez trouver en pièces jointes :\n"
+            "- la liste des présents\n"
+            "- la liste des non émargés\n\n"
+            f"Agent : {staff_name or 'unknown'}\n"
+            f"Fichier : {st.session_state.get('filename','')}\n"
+            f"Horodatage : {now_paris_str()} (Europe/Paris)\n"
+        )
+
+        attachments = [
+            (f"emargement_presents_{ts}.csv", csv_present_bytes, "text/csv"),
+            (f"emargement_non_emarges_{ts}.csv", csv_not_present_bytes, "text/csv"),
+        ]
+
+        ok, msg = send_email_with_attachments(
+            smtp_host=smtp_host,
+            smtp_port=int(smtp_port),
+            smtp_user=smtp_user,
+            smtp_password=smtp_password,
+            mail_from=mail_from,
+            to_addr=MAIL_TO,
+            subject=subject,
+            body=body,
+            attachments=attachments,
+        )
+        if ok:
+            st.success(msg)
+        else:
+            st.error(msg)
