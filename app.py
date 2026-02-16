@@ -1,16 +1,12 @@
 # app.py
 import io
 import re
-import os
-import ssl
-import smtplib
 import hashlib
 import unicodedata
 import urllib.parse
 from pathlib import Path
 from datetime import datetime
 from zoneinfo import ZoneInfo
-from email.message import EmailMessage
 
 import pandas as pd
 import streamlit as st
@@ -37,8 +33,6 @@ LOGO_CANDIDATES = [
     "LOGO ROSE.png",
     "LOGO_ROSE.png",
     "logo.png",
-    "LOGO ROSE.png",  # ton repo
-    "LOGO ROSE.png".lower(),
 ]
 
 ALIASES = {
@@ -331,42 +325,9 @@ def badge_html(is_present: bool) -> str:
     return "<span class='badge-todo'>À émarger</span>"
 
 
-def send_email_with_attachments(
-    smtp_host: str,
-    smtp_port: int,
-    smtp_user: str,
-    smtp_password: str,
-    mail_from: str,
-    to_addr: str,
-    subject: str,
-    body: str,
-    attachments: list[tuple[str, bytes, str]],
-) -> tuple[bool, str]:
-    """
-    Envoie un email via SMTP.
-    attachments: list of (filename, data_bytes, mime_type)
-    """
-    msg = EmailMessage()
-    msg["From"] = mail_from
-    msg["To"] = to_addr
-    msg["Subject"] = subject
-    msg.set_content(body)
-
-    for filename, data, mime in attachments:
-        maintype, subtype = mime.split("/", 1)
-        msg.add_attachment(data, maintype=maintype, subtype=subtype, filename=filename)
-
-    context = ssl.create_default_context()
-    try:
-        with smtplib.SMTP(smtp_host, smtp_port, timeout=15) as server:
-            server.ehlo()
-            server.starttls(context=context)
-            server.ehlo()
-            server.login(smtp_user, smtp_password)
-            server.send_message(msg)
-        return True, "Email envoyé."
-    except Exception as e:
-        return False, f"Échec d’envoi : {e}"
+def mailto_link(to: str, subject: str, body: str) -> str:
+    params = {"subject": subject, "body": body}
+    return f"mailto:{to}?" + urllib.parse.urlencode(params, quote_via=urllib.parse.quote)
 
 
 # =========================
@@ -417,9 +378,9 @@ h1, h2, h3, h4 {{ color: {TEXT}; }}
   color: #ffffff !important;
   border: none !important;
   border-radius: 14px !important;
-  padding: 0.75rem 1.05rem !important;
-  font-weight: 800 !important;
-  min-height: 46px !important;
+  padding: 0.85rem 1.05rem !important;
+  font-weight: 900 !important;
+  min-height: 52px !important; /* tablette */
   white-space: nowrap !important;
 }}
 .stButton > button * {{ color: #ffffff !important; }}
@@ -433,33 +394,23 @@ button[kind="secondary"], .stButton > button[kind="secondary"] {{
 button[kind="secondary"] * {{ color: {PRIMARY} !important; }}
 
 .badge-present {{
-  background:#DCFCE7; color:#166534; padding:6px 12px; border-radius:10px; font-weight:800;
+  background:#DCFCE7; color:#166534; padding:7px 12px; border-radius:10px; font-weight:900;
   display:inline-block; white-space:nowrap;
 }}
 .badge-todo {{
-  background:#F3F4F6; color:#374151; padding:6px 12px; border-radius:10px; font-weight:800;
+  background:#F3F4F6; color:#374151; padding:7px 12px; border-radius:10px; font-weight:900;
   display:inline-block; white-space:nowrap;
 }}
 
 .cell-nowrap {{
   white-space: nowrap !important;
-  overflow: visible !important;
-  text-overflow: unset !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
 }}
 
 @media (max-width: 980px) {{
   .block-container {{ padding-left: 1rem; padding-right: 1rem; }}
-
-  .badge-present, .badge-todo {{
-    font-size: 0.90rem;
-    padding: 6px 10px;
-  }}
-  .stButton > button {{
-    min-height: 52px !important;
-    font-size: 0.95rem !important;
-    padding: 0.70rem 0.90rem !important;
-  }}
-  .stTextInput input {{ font-size: 1.05rem !important; }}
+  .stTextInput input {{ font-size: 1.07rem !important; }}
 }}
 </style>
 """
@@ -490,16 +441,6 @@ with st.sidebar:
     st.markdown("---")
     st.caption("Fuseau horaire : **Europe/Paris**")
     st.caption("Autosauvegarde automatique")
-
-    st.markdown("---")
-    st.subheader("Envoi par email (option)")
-    st.caption("Renseigne les variables d'environnement SMTP côté machine/serveur.")
-    smtp_host = st.text_input("SMTP_HOST", value=os.getenv("SMTP_HOST", "")).strip()
-    smtp_port = int(os.getenv("SMTP_PORT", "587"))
-    smtp_port = st.number_input("SMTP_PORT", min_value=1, max_value=65535, value=smtp_port, step=1)
-    smtp_user = st.text_input("SMTP_USER", value=os.getenv("SMTP_USER", "")).strip()
-    smtp_password = st.text_input("SMTP_PASSWORD", value=os.getenv("SMTP_PASSWORD", ""), type="password")
-    mail_from = st.text_input("MAIL_FROM", value=os.getenv("MAIL_FROM", smtp_user or ""), help="Ex: evenements@institutimagine.org")
 
 # =========================
 # UPLOAD + AUTO-RESTORE
@@ -569,7 +510,7 @@ k3.metric("Restants", remaining)
 with k4:
     query = st.text_input(
         "Recherche",
-        placeholder="Nom, prénom, email, société… (accents ignorés)",
+        placeholder="Nom, prénom, email, société… (accents ignorés, ordre libre)",
         key="search_query",
     ).strip()
 
@@ -584,7 +525,7 @@ with f1:
 with f2:
     show_present_only = st.checkbox("Présents uniquement", value=False)
 with f3:
-    st.caption("Astuce : tape 'dupont jean' (ordre libre), accents/apostrophes ignorés.")
+    st.caption("Astuce : tape 'dupont jean' ou 'jean dupont' (accents/apostrophes ignorés).")
 
 st.divider()
 
@@ -600,7 +541,7 @@ if not display_cols:
 
 search_cols = list(dict.fromkeys(display_cols + [c for c in ["email", "company", "function"] if c in df.columns]))
 
-# Build search blob once
+# Build search blob once (for fast AND-token filtering)
 if "_search_blob" not in df.columns:
     df["_search_blob"] = build_search_blob(df, search_cols)
     st.session_state.df = df
@@ -634,7 +575,7 @@ if query.strip():
         auto_target_id = candidates.iloc[0]["__id"]
 
 # =========================
-# QUICK TARGET CARD
+# QUICK TARGET CARD (tablet friendly)
 # =========================
 if auto_target_id:
     target_row = df[df["__id"] == auto_target_id].iloc[0]
@@ -646,10 +587,10 @@ if auto_target_id:
             f"""
             <div style="background:white;border-radius:16px;padding:14px 16px;
                         box-shadow:0 1px 12px rgba(0,0,0,0.06);">
-              <div style="font-weight:900;font-size:1.15rem; white-space:nowrap;">
+              <div style="font-weight:900;font-size:1.15rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">
                 {target_row.get("first_name","")} {target_row.get("last_name","")}
               </div>
-              <div style="color:{MUTED};margin-top:2px; white-space:nowrap;">
+              <div style="color:{MUTED};margin-top:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">
                 {target_row.get("email","")} • {target_row.get("company","")} • {target_row.get("function","")}
               </div>
               <div style="margin-top:10px;">
@@ -713,7 +654,7 @@ view_page = view.iloc[start:end].copy()
 # =========================
 st.subheader("Liste des participants")
 
-header = st.columns([2.5, 3, 3, 3, 3, 2, 2], vertical_alignment="center")
+header = st.columns([2.2, 2.8, 3, 3, 3, 2, 2], vertical_alignment="center")
 header[0].markdown("**Prénom**")
 header[1].markdown("**Nom**")
 header[2].markdown("**Email**")
@@ -732,7 +673,7 @@ for _, row in view_page.iterrows():
     co = row.get("company", "")
     fu = row.get("function", "")
 
-    cols = st.columns([2.5, 3, 3, 3, 3, 2, 2], vertical_alignment="center")
+    cols = st.columns([2.2, 2.8, 3, 3, 3, 2, 2], vertical_alignment="center")
 
     cols[0].markdown(f"<div class='cell-nowrap'>{fn}</div>", unsafe_allow_html=True)
     cols[1].markdown(f"<div class='cell-nowrap'>{ln}</div>", unsafe_allow_html=True)
@@ -810,11 +751,10 @@ with e3:
 st.divider()
 
 # =========================
-# EMAIL (via application mail par défaut)
+# EMAIL (ouvre l'app mail par défaut)
 # =========================
 st.subheader("Envoyer les exports par email")
 
-# Recalcul local des exports ciblés (présents / non émargés)
 export_df = df.drop(columns=["__id"], errors="ignore").copy()
 present_only = export_df[export_df["present"] == True].copy()
 not_present_only = export_df[export_df["present"] == False].copy()
@@ -822,29 +762,22 @@ not_present_only = export_df[export_df["present"] == False].copy()
 csv_present_bytes = present_only.to_csv(index=False, sep=";", encoding="utf-8-sig").encode("utf-8-sig")
 csv_not_present_bytes = not_present_only.to_csv(index=False, sep=";", encoding="utf-8-sig").encode("utf-8-sig")
 
-c1, c2, c3 = st.columns([1, 1, 2], vertical_alignment="center")
-with c1:
-    st.download_button(
-        "⬇️ CSV (présents) pour email",
-        data=csv_present_bytes,
-        file_name="emargement_presents.csv",
-        mime="text/csv",
-        use_container_width=True,
-    )
-with c2:
-    st.download_button(
-        "⬇️ CSV (non émargés) pour email",
-        data=csv_not_present_bytes,
-        file_name="emargement_non_emarges.csv",
-        mime="text/csv",
-        use_container_width=True,
-    )
-with c3:
-    st.caption("Télécharge les 2 CSV ci-contre, puis ouvre l’email pré-rempli et joins les fichiers.")
-
-def mailto_link(to: str, subject: str, body: str) -> str:
-    params = {"subject": subject, "body": body}
-    return f"mailto:{to}?" + urllib.parse.urlencode(params, quote_via=urllib.parse.quote)
+# Tablet-friendly: empilement vertical pour éviter chevauchement
+st.download_button(
+    "⬇️ CSV (présents) pour email",
+    data=csv_present_bytes,
+    file_name="emargement_presents.csv",
+    mime="text/csv",
+    use_container_width=True,
+)
+st.download_button(
+    "⬇️ CSV (non émargés) pour email",
+    data=csv_not_present_bytes,
+    file_name="emargement_non_emarges.csv",
+    mime="text/csv",
+    use_container_width=True,
+)
+st.caption("Télécharge les 2 CSV ci-dessus, puis ouvre l’email pré-rempli et joins les fichiers.")
 
 ts = datetime.now(PARIS_TZ).strftime("%Y-%m-%d_%H%M")
 subject = f"[Émargement] Exports présents / non émargés — {st.session_state.get('filename','liste')} — {ts}"
@@ -861,7 +794,6 @@ body = (
     f"Horodatage : {now_paris_str()} (Europe/Paris)\n"
 )
 
-MAIL_TO = "evenements@institutimagine.org"
 link = mailto_link(MAIL_TO, subject, body)
 
 st.markdown(
@@ -872,9 +804,9 @@ st.markdown(
         color:white;
         border:none;
         border-radius:14px;
-        padding:0.75rem 1.05rem;
-        font-weight:800;
-        min-height:46px;
+        padding:0.85rem 1.05rem;
+        font-weight:900;
+        min-height:52px;
         width:100%;
         cursor:pointer;">
         📧 Ouvrir l’application mail
