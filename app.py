@@ -339,6 +339,17 @@ css = f"""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@400;600;700;800;900&display=swap');
 
+/* Empêche l'affichage du nom d'icône en texte (fallback) */
+button[data-testid="stSidebarCollapseButton"] span {
+  font-size: 0 !important;
+}
+/* Remplace par un symbole simple, offline, propre */
+button[data-testid="stSidebarCollapseButton"]::before {
+  content: "❯❯";
+  font-weight: 900;
+  font-size: 18px;
+  color: #6B7280;
+}
 :root {{
   --font: 'Montserrat', sans-serif;
 }}
