@@ -287,7 +287,7 @@ css = f"""
 
 html, body, [class*="css"] {{
   font-family: 'Montserrat', sans-serif !important;
-}
+}}
 <style>
 .stApp {{ background: {BG}; }}
 .block-container {{ padding-top: 1.1rem; max-width: 1280px; }}
