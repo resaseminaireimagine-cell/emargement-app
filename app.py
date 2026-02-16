@@ -395,7 +395,7 @@ with st.sidebar:
 uploaded = st.file_uploader("Importer un fichier Excel (.xlsx)", type=["xlsx"])
 
 if uploaded is None:
-    st.info("➡️ Importez un fichier Excel pour commencer.")
+    st.info("Importez un fichier Excel pour commencer.")
     st.stop()
 
 file_hash = hash_uploaded_file(uploaded)
