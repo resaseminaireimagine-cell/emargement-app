@@ -335,8 +335,7 @@ def mailto_link(to: str, subject: str, body: str) -> str:
 # =========================
 st.set_page_config(page_title=APP_TITLE, layout="wide")
 
-# (Optionnel) Force le chargement des Material Icons (si jamais Streamlit ne les charge pas bien)
-# Gardé ici, mais ton fallback CSS ci-dessous suffit même si Google Fonts est bloqué.
+# Force le chargement des icônes (peut aider selon versions / cache)
 st.markdown("""
 <link rel="stylesheet" href="https://fonts.googleapis.com/icon?family=Material+Icons">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0" />
@@ -359,6 +358,11 @@ h1, h2, h3, h4, h5, h6,
 .stCaption, small, p, label, span, div,
 button, input, textarea {{
   font-family: var(--font) !important;
+}}
+
+/* Cache le header natif Streamlit (évite le doublon) */
+header[data-testid="stHeader"] {{
+  display: none;
 }}
 
 .stApp {{ background: {BG}; }}
@@ -415,12 +419,12 @@ button[kind="secondary"] * {{ color: {PRIMARY} !important; }}
   text-overflow: ellipsis !important;
 }}
 
-/* Fix Streamlit Cloud : évite l'affichage "double_arrow_right" en texte */
+/* Fix : évite l'affichage "double_arrow_right" en texte */
 button[data-testid="stSidebarCollapseButton"] span {{
   font-size: 0 !important;
 }}
 
-/* Remplace par un symbole propre (offline, zéro dépendance) */
+/* Fallback propre (offline) si les icônes ne chargent pas */
 button[data-testid="stSidebarCollapseButton"]::before {{
   content: "❯❯";
   font-weight: 900;
@@ -437,19 +441,7 @@ button[data-testid="stSidebarCollapseButton"]::before {{
 st.markdown(css, unsafe_allow_html=True)
 
 # =========================
-# HEADER
-# =========================
-logo_path = find_logo_path()
-c1, c2 = st.columns([1, 6], vertical_alignment="center")
-with c1:
-    if logo_path:
-        st.image(logo_path, width=90)
-with c2:
-    st.markdown(f"## {APP_TITLE}")
-    st.caption("Importez votre liste, recherchez un participant, émargez, puis exportez la feuille d’émargement.")
-st.divider()
-# =========================
-# HEADER
+# HEADER (custom premium)
 # =========================
 logo_path = find_logo_path()
 c1, c2 = st.columns([1, 6], vertical_alignment="center")
