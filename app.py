@@ -335,21 +335,17 @@ def mailto_link(to: str, subject: str, body: str) -> str:
 # =========================
 st.set_page_config(page_title=APP_TITLE, layout="wide")
 
+# (Optionnel) Force le chargement des Material Icons (si jamais Streamlit ne les charge pas bien)
+# Gardé ici, mais ton fallback CSS ci-dessous suffit même si Google Fonts est bloqué.
+st.markdown("""
+<link rel="stylesheet" href="https://fonts.googleapis.com/icon?family=Material+Icons">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0" />
+""", unsafe_allow_html=True)
+
 css = f"""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@400;600;700;800;900&display=swap');
 
-/* Empêche l'affichage du nom d'icône en texte (fallback) */
-button[data-testid="stSidebarCollapseButton"] span {
-  font-size: 0 !important;
-}
-/* Remplace par un symbole simple, offline, propre */
-button[data-testid="stSidebarCollapseButton"]::before {
-  content: "❯❯";
-  font-weight: 900;
-  font-size: 18px;
-  color: #6B7280;
-}
 :root {{
   --font: 'Montserrat', sans-serif;
 }}
@@ -419,6 +415,19 @@ button[kind="secondary"] * {{ color: {PRIMARY} !important; }}
   text-overflow: ellipsis !important;
 }}
 
+/* Fix Streamlit Cloud : évite l'affichage "double_arrow_right" en texte */
+button[data-testid="stSidebarCollapseButton"] span {{
+  font-size: 0 !important;
+}}
+
+/* Remplace par un symbole propre (offline, zéro dépendance) */
+button[data-testid="stSidebarCollapseButton"]::before {{
+  content: "❯❯";
+  font-weight: 900;
+  font-size: 18px;
+  color: {MUTED};
+}}
+
 @media (max-width: 980px) {{
   .block-container {{ padding-left: 1rem; padding-right: 1rem; }}
   .stTextInput input {{ font-size: 1.07rem !important; }}
@@ -427,6 +436,18 @@ button[kind="secondary"] * {{ color: {PRIMARY} !important; }}
 """
 st.markdown(css, unsafe_allow_html=True)
 
+# =========================
+# HEADER
+# =========================
+logo_path = find_logo_path()
+c1, c2 = st.columns([1, 6], vertical_alignment="center")
+with c1:
+    if logo_path:
+        st.image(logo_path, width=90)
+with c2:
+    st.markdown(f"## {APP_TITLE}")
+    st.caption("Importez votre liste, recherchez un participant, émargez, puis exportez la feuille d’émargement.")
+st.divider()
 # =========================
 # HEADER
 # =========================
