@@ -212,7 +212,7 @@ def build_exports(df: pd.DataFrame) -> tuple[bytes, bytes, bytes]:
 def pager(page_count: int, page_value: int, label: str):
     c_prev, c_info, c_next = st.columns([1, 2, 1], vertical_alignment="center")
     with c_prev:
-        if st.button("⬅️ Page précédente", disabled=(page_value <= 1), key=f"prev_{label}", use_container_width=True):
+        if st.button("Page précédente", disabled=(page_value <= 1), key=f"prev_{label}", use_container_width=True):
             st.session_state.page = max(1, page_value - 1)
             st.rerun()
     with c_info:
@@ -221,7 +221,7 @@ def pager(page_count: int, page_value: int, label: str):
             unsafe_allow_html=True,
         )
     with c_next:
-        if st.button("Page suivante ➡️", disabled=(page_value >= page_count), key=f"next_{label}", use_container_width=True):
+        if st.button("Page suivante", disabled=(page_value >= page_count), key=f"next_{label}", use_container_width=True):
             st.session_state.page = min(page_count, page_value + 1)
             st.rerun()
 
