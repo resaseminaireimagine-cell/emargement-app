@@ -278,6 +278,17 @@ st.set_page_config(page_title=APP_TITLE, layout="wide")
 
 css = f"""
 <style>
+@import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@400;600;700;800;900&display=swap');
+
+.stApp {{
+  background: {BG};
+  font-family: 'Montserrat', sans-serif !important;
+}}
+
+html, body, [class*="css"] {{
+  font-family: 'Montserrat', sans-serif !important;
+}
+<style>
 .stApp {{ background: {BG}; }}
 .block-container {{ padding-top: 1.1rem; max-width: 1280px; }}
 h1, h2, h3, h4 {{ color: {TEXT}; }}
