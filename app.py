@@ -6,6 +6,7 @@ import ssl
 import smtplib
 import hashlib
 import unicodedata
+import urllib.parse
 from pathlib import Path
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -809,10 +810,11 @@ with e3:
 st.divider()
 
 # =========================
-# EMAIL EXPORTS
+# EMAIL (via application mail par défaut)
 # =========================
 st.subheader("Envoyer les exports par email")
 
+# Recalcul local des exports ciblés (présents / non émargés)
 export_df = df.drop(columns=["__id"], errors="ignore").copy()
 present_only = export_df[export_df["present"] == True].copy()
 not_present_only = export_df[export_df["present"] == False].copy()
@@ -820,55 +822,64 @@ not_present_only = export_df[export_df["present"] == False].copy()
 csv_present_bytes = present_only.to_csv(index=False, sep=";", encoding="utf-8-sig").encode("utf-8-sig")
 csv_not_present_bytes = not_present_only.to_csv(index=False, sep=";", encoding="utf-8-sig").encode("utf-8-sig")
 
-colA, colB = st.columns([2, 1], vertical_alignment="center")
-with colA:
-    st.caption(f"Envoi vers : **{MAIL_TO}** (2 pièces jointes : présents + non émargés).")
-with colB:
-    send_now = st.button("📧 Envoyer maintenant", use_container_width=True, type="primary")
+c1, c2, c3 = st.columns([1, 1, 2], vertical_alignment="center")
+with c1:
+    st.download_button(
+        "⬇️ CSV (présents) pour email",
+        data=csv_present_bytes,
+        file_name="emargement_presents.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
+with c2:
+    st.download_button(
+        "⬇️ CSV (non émargés) pour email",
+        data=csv_not_present_bytes,
+        file_name="emargement_non_emarges.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
+with c3:
+    st.caption("Télécharge les 2 CSV ci-contre, puis ouvre l’email pré-rempli et joins les fichiers.")
 
-if send_now:
-    # Validation minimale
-    missing = []
-    if not smtp_host:
-        missing.append("SMTP_HOST")
-    if not smtp_user:
-        missing.append("SMTP_USER")
-    if not smtp_password:
-        missing.append("SMTP_PASSWORD")
-    if not mail_from:
-        missing.append("MAIL_FROM")
-    if missing:
-        st.error("Config SMTP manquante : " + ", ".join(missing))
-    else:
-        ts = datetime.now(PARIS_TZ).strftime("%Y-%m-%d_%H%M")
-        subject = f"[Émargement] Exports présents / non émargés — {st.session_state.get('filename','liste')} — {ts}"
-        body = (
-            "Bonjour,\n\n"
-            "Veuillez trouver en pièces jointes :\n"
-            "- la liste des présents\n"
-            "- la liste des non émargés\n\n"
-            f"Agent : {staff_name or 'unknown'}\n"
-            f"Fichier : {st.session_state.get('filename','')}\n"
-            f"Horodatage : {now_paris_str()} (Europe/Paris)\n"
-        )
+def mailto_link(to: str, subject: str, body: str) -> str:
+    params = {"subject": subject, "body": body}
+    return f"mailto:{to}?" + urllib.parse.urlencode(params, quote_via=urllib.parse.quote)
 
-        attachments = [
-            (f"emargement_presents_{ts}.csv", csv_present_bytes, "text/csv"),
-            (f"emargement_non_emarges_{ts}.csv", csv_not_present_bytes, "text/csv"),
-        ]
+ts = datetime.now(PARIS_TZ).strftime("%Y-%m-%d_%H%M")
+subject = f"[Émargement] Exports présents / non émargés — {st.session_state.get('filename','liste')} — {ts}"
+body = (
+    "Bonjour,\n\n"
+    "Veuillez trouver en pièces jointes :\n"
+    "- la liste des présents\n"
+    "- la liste des non émargés\n\n"
+    "Pièces jointes à ajouter :\n"
+    "1) emargement_presents.csv\n"
+    "2) emargement_non_emarges.csv\n\n"
+    f"Agent : {staff_name or 'unknown'}\n"
+    f"Fichier : {st.session_state.get('filename','')}\n"
+    f"Horodatage : {now_paris_str()} (Europe/Paris)\n"
+)
 
-        ok, msg = send_email_with_attachments(
-            smtp_host=smtp_host,
-            smtp_port=int(smtp_port),
-            smtp_user=smtp_user,
-            smtp_password=smtp_password,
-            mail_from=mail_from,
-            to_addr=MAIL_TO,
-            subject=subject,
-            body=body,
-            attachments=attachments,
-        )
-        if ok:
-            st.success(msg)
-        else:
-            st.error(msg)
+MAIL_TO = "evenements@institutimagine.org"
+link = mailto_link(MAIL_TO, subject, body)
+
+st.markdown(
+    f"""
+    <a href="{link}">
+      <button style="
+        background:{PRIMARY};
+        color:white;
+        border:none;
+        border-radius:14px;
+        padding:0.75rem 1.05rem;
+        font-weight:800;
+        min-height:46px;
+        width:100%;
+        cursor:pointer;">
+        📧 Ouvrir l’application mail
+      </button>
+    </a>
+    """,
+    unsafe_allow_html=True
+)
