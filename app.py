@@ -1,3 +1,4 @@
+# app.py
 import io
 import re
 import hashlib
@@ -50,16 +51,19 @@ ALIASES = {
 }
 STANDARD_ORDER = ["first_name", "last_name", "email", "company", "function"]
 
+PRESENT_TRUE = {"true", "1", "yes", "oui", "vrai", "x", "present", "présent"}
+
 
 # =========================
 # HELPERS
 # =========================
 def now_paris_str() -> str:
+    # ISO-like, stable, easy to parse
     return datetime.now(PARIS_TZ).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def norm(s: str) -> str:
-    s = str(s)
+    s = "" if s is None else str(s)
     s = s.replace("\u00A0", " ")
     s = s.replace("\t", " ")
     s = s.replace("\n", " ")
@@ -81,18 +85,20 @@ def standardize_columns(df: pd.DataFrame) -> pd.DataFrame:
     original_cols = list(df.columns)
     norm_cols = {c: norm(c) for c in original_cols}
 
-    mapping = {}
-    used_std = set()
+    mapping: dict[str, str] = {}
+    used_std: set[str] = set()
 
     for std, candidates in ALIASES.items():
-        candidates_norm = set(norm(x) for x in candidates)
+        candidates_norm = [norm(x) for x in candidates]
         for c in original_cols:
             nc = norm_cols[c]
+            if std in used_std:
+                continue
             if (
                 nc in candidates_norm
                 or any(nc.startswith(cand) for cand in candidates_norm)
                 or any(cand in nc for cand in candidates_norm)
-            ) and std not in used_std:
+            ):
                 mapping[c] = std
                 used_std.add(std)
                 break
@@ -100,14 +106,24 @@ def standardize_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df.rename(columns=mapping)
 
 
+def coerce_present(v) -> bool:
+    if isinstance(v, bool):
+        return v
+    if v is None:
+        return False
+    s = norm(v)
+    if s == "" or s == "nan":
+        return False
+    return s in PRESENT_TRUE
+
+
 def ensure_internal_columns(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     if "present" not in df.columns:
         df["present"] = False
     else:
-        df["present"] = df["present"].apply(
-            lambda x: str(x).strip().lower() in ["true", "1", "yes", "oui", "vrai"]
-        )
+        df["present"] = df["present"].apply(coerce_present)
+
     if "checkin_time" not in df.columns:
         df["checkin_time"] = ""
     if "checkin_by" not in df.columns:
@@ -116,12 +132,12 @@ def ensure_internal_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def make_base_id(row: pd.Series) -> str:
-    email = str(row.get("email", "")).strip().lower()
+    email = norm(row.get("email", ""))
     if email and email != "nan":
         return f"email:{email}"
-    fn = str(row.get("first_name", "")).strip().lower()
-    ln = str(row.get("last_name", "")).strip().lower()
-    co = str(row.get("company", "")).strip().lower()
+    fn = norm(row.get("first_name", ""))
+    ln = norm(row.get("last_name", ""))
+    co = norm(row.get("company", ""))
     return f"name:{ln}|{fn}|{co}"
 
 
@@ -130,14 +146,22 @@ def add_ids(df: pd.DataFrame) -> pd.DataFrame:
     if "__base_id" not in df.columns:
         df["__base_id"] = df.apply(make_base_id, axis=1)
     # __id unique pour les keys UI (doit être unique même si base_id dupliqué)
+    # On conserve l'index courant : suffisant car __id est recalculé après (re)load/autosave.
     df["__id"] = df["__base_id"] + "|row:" + df.index.astype(str)
     return df
 
 
+def sanitize_df(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df = df.fillna("")
+    # Assure des strings dans les colonnes texte pour éviter surprises (NaN, numbers)
+    for c in ["first_name", "last_name", "email", "company", "function", "checkin_time", "checkin_by", "__base_id"]:
+        if c in df.columns:
+            df[c] = df[c].astype(str).replace("nan", "")
+    return df
+
+
 def hash_uploaded_file(uploaded_file) -> str:
-    """
-    Hash stable du fichier importé (pour lier une autosave au bon Excel).
-    """
     data = uploaded_file.getvalue()
     return hashlib.sha256(data).hexdigest()[:16]
 
@@ -147,19 +171,12 @@ def autosave_path(file_hash: str) -> Path:
 
 
 def autosave_df(df: pd.DataFrame, file_hash: str) -> None:
-    """
-    Sauvegarde automatique côté serveur.
-    """
     p = autosave_path(file_hash)
-    # On enlève __id (pure UI) mais on garde __base_id + colonnes métier
     export_df = df.drop(columns=["__id"], errors="ignore").copy()
     export_df.to_csv(p, index=False, sep=";", encoding="utf-8-sig")
 
 
 def try_load_autosave(file_hash: str) -> pd.DataFrame | None:
-    """
-    Si une autosave existe pour ce fichier, on la charge.
-    """
     p = autosave_path(file_hash)
     if not p.exists():
         return None
@@ -167,7 +184,7 @@ def try_load_autosave(file_hash: str) -> pd.DataFrame | None:
         df = pd.read_csv(p, sep=";", encoding="utf-8-sig")
         df = standardize_columns(df)
         df = ensure_internal_columns(df)
-        df = df.fillna("")
+        df = sanitize_df(df)
         df = add_ids(df)
         return df
     except Exception:
@@ -178,19 +195,23 @@ def load_excel(uploaded_file) -> pd.DataFrame:
     df = pd.read_excel(uploaded_file, engine="openpyxl")
     df = standardize_columns(df)
     df = ensure_internal_columns(df)
-    df = df.fillna("")
+    df = sanitize_df(df)
     df = add_ids(df)
     return df
 
 
-def search_text(row: pd.Series, cols: list[str]) -> str:
+def build_search_blob(df: pd.DataFrame, cols: list[str]) -> pd.Series:
+    # Vectorisé: concat des colonnes en une fois
     parts = []
     for c in cols:
-        if c in row.index:
-            v = row[c]
-            if pd.notna(v) and str(v).strip():
-                parts.append(str(v))
-    return " ".join(parts).lower()
+        if c in df.columns:
+            parts.append(df[c].astype(str))
+    if not parts:
+        return pd.Series([""] * len(df), index=df.index)
+    blob = parts[0]
+    for p in parts[1:]:
+        blob = blob + " " + p
+    return blob.str.lower()
 
 
 def build_exports(df: pd.DataFrame) -> tuple[bytes, bytes, bytes]:
@@ -226,16 +247,16 @@ def pager(page_count: int, page_value: int, label: str):
             st.rerun()
 
 
-def relevance_score(row: pd.Series, q: str) -> int:
+def relevance_score_row(row: pd.Series, q: str) -> int:
     if not q:
         return 0
     q = q.strip().lower()
 
-    fn = str(row.get("first_name", "")).strip().lower()
-    ln = str(row.get("last_name", "")).strip().lower()
-    em = str(row.get("email", "")).strip().lower()
-    co = str(row.get("company", "")).strip().lower()
-    fu = str(row.get("function", "")).strip().lower()
+    fn = norm(row.get("first_name", ""))
+    ln = norm(row.get("last_name", ""))
+    em = norm(row.get("email", ""))
+    co = norm(row.get("company", ""))
+    fu = norm(row.get("function", ""))
 
     score = 0
     if q == em:
@@ -271,6 +292,12 @@ def relevance_score(row: pd.Series, q: str) -> int:
     return score
 
 
+def badge_html(is_present: bool) -> str:
+    if is_present:
+        return "<span class='badge-present'>✔ Présent</span>"
+    return "<span class='badge-todo'>À émarger</span>"
+
+
 # =========================
 # PAGE CONFIG + CSS
 # =========================
@@ -288,8 +315,7 @@ css = f"""
 html, body, [class*="css"] {{
   font-family: 'Montserrat', sans-serif !important;
 }}
-<style>
-.stApp {{ background: {BG}; }}
+
 .block-container {{ padding-top: 1.1rem; max-width: 1280px; }}
 h1, h2, h3, h4 {{ color: {TEXT}; }}
 .stCaption, small, p {{ color: {MUTED}; }}
@@ -388,7 +414,6 @@ with st.sidebar:
     st.caption("Fuseau horaire : **Europe/Paris**")
     st.caption("Autosauvegarde automatique")
 
-
 # =========================
 # UPLOAD + AUTO-RESTORE
 # =========================
@@ -406,25 +431,22 @@ if "file_hash" not in st.session_state or st.session_state.get("file_hash") != f
     st.session_state.filename = uploaded.name
     st.session_state.page = 1
     st.session_state["_prev_query"] = ""
+    st.session_state["_prev_page_size"] = None
 
-    # auto-restore si autosave existe
     restored = try_load_autosave(file_hash)
     if restored is not None:
         st.session_state.df = restored
         st.toast("Autosauvegarde restaurée ✅", icon="✅")
     else:
         st.session_state.df = load_excel(uploaded)
-        # créer une autosave initiale (utile)
         autosave_df(st.session_state.df, file_hash)
 
 df = st.session_state.df
 
 # =========================
-# SECURITY BUTTON (sans action d’émargement)
+# INFO
 # =========================
-# Rien à cliquer pour sauvegarder. On affiche juste l’info.
 st.caption("💾 Autosauvegarde : l’état est enregistré automatiquement après chaque émargement/annulation.")
-
 st.divider()
 
 # =========================
@@ -448,7 +470,6 @@ donut = (
     .properties(height=240)
 )
 st.altair_chart(donut, use_container_width=True)
-
 st.divider()
 
 # =========================
@@ -466,7 +487,6 @@ with k4:
         key="search_query",
     ).strip().lower()
 
-# reset page si recherche change
 prev_q = st.session_state.get("_prev_query", "")
 if query != prev_q:
     st.session_state.page = 1
@@ -483,23 +503,32 @@ with f3:
 st.divider()
 
 # =========================
-# VIEW FILTER + RELEVANCE SORT
+# VIEW FILTER + SORT
 # =========================
 display_cols = [c for c in STANDARD_ORDER if c in df.columns]
 if not display_cols:
     display_cols = [
         c for c in df.columns
-        if c not in ["present", "checkin_time", "checkin_by", "__id", "__base_id"]
+        if c not in ["present", "checkin_time", "checkin_by", "__id", "__base_id", "_search_blob"]
     ][:4]
 
 search_cols = list(dict.fromkeys(display_cols + [c for c in ["email", "company", "function"] if c in df.columns]))
 
+# Precompute search blob once per loaded df (keep in session_state)
+if "_search_blob" not in df.columns:
+    df["_search_blob"] = build_search_blob(df, search_cols)
+    st.session_state.df = df  # persist
+    autosave_df(df, file_hash)  # keep autosave aligned
+
 view = df.copy()
 
 if query:
-    mask = view.apply(lambda r: query in search_text(r, search_cols), axis=1)
+    # Fast filter via blob
+    q_esc = re.escape(query)
+    mask = view["_search_blob"].str.contains(q_esc, na=False, regex=True)
     view = view[mask].copy()
-    view["_score"] = view.apply(lambda r: relevance_score(r, query), axis=1)
+    # Score only on filtered subset
+    view["_score"] = view.apply(lambda r: relevance_score_row(r, query), axis=1)
     view = view.sort_values(by=["_score"], ascending=False, kind="stable")
 else:
     if "last_name" in view.columns and "first_name" in view.columns:
@@ -510,7 +539,7 @@ if show_present_only:
 elif only_not_present:
     view = view[view["present"] == False].copy()
 
-# auto-cible : si 1 seul résultat non émargé
+# Auto-cible : si 1 seul résultat non émargé
 auto_target_id = None
 if query:
     candidates = view[view["present"] == False]
@@ -551,9 +580,9 @@ if auto_target_id:
                 i = idx[0]
                 df.at[i, "present"] = True
                 df.at[i, "checkin_time"] = now_paris_str()
-                df.at[i, "checkin_by"] = staff_name
+                df.at[i, "checkin_by"] = staff_name if staff_name else "unknown"
                 st.session_state.df = df
-                autosave_df(df, file_hash)  # ✅ autosave automatique
+                autosave_df(df, file_hash)
             st.rerun()
 
     st.divider()
@@ -563,7 +592,6 @@ if auto_target_id:
 # =========================
 PAGE_SIZE_OPTIONS = [25, 50, 75, 100]
 
-# Choix du nombre de participants par page
 default_page_size = 25 if tablet_mode else 50
 if default_page_size not in PAGE_SIZE_OPTIONS:
     default_page_size = PAGE_SIZE_OPTIONS[0]
@@ -575,7 +603,6 @@ PAGE_SIZE = st.selectbox(
     key="page_size",
 )
 
-# Si on change la taille de page, on revient page 1
 prev_ps = st.session_state.get("_prev_page_size", PAGE_SIZE)
 if PAGE_SIZE != prev_ps:
     st.session_state.page = 1
@@ -599,7 +626,6 @@ view_page = view.iloc[start:end].copy()
 # =========================
 st.subheader("Liste des participants")
 
-# Plus de place pour Prénom / Nom
 header = st.columns([2.5, 3, 3, 3, 3, 2, 2], vertical_alignment="center")
 header[0].markdown("**Prénom**")
 header[1].markdown("**Nom**")
@@ -608,11 +634,6 @@ header[3].markdown("**Société**")
 header[4].markdown("**Fonction**")
 header[5].markdown("**Statut**")
 header[6].markdown("**Action**")
-
-def badge_html(is_present: bool) -> str:
-    if is_present:
-        return "<span class='badge-present'>✔ Présent</span>"
-    return "<span class='badge-todo'>À émarger</span>"
 
 for _, row in view_page.iterrows():
     rid = row["__id"]
@@ -641,9 +662,9 @@ for _, row in view_page.iterrows():
                 i = idx[0]
                 df.at[i, "present"] = True
                 df.at[i, "checkin_time"] = now_paris_str()
-                df.at[i, "checkin_by"] = staff_name
+                df.at[i, "checkin_by"] = staff_name if staff_name else "unknown"
                 st.session_state.df = df
-                autosave_df(df, file_hash)  # ✅ autosave automatique
+                autosave_df(df, file_hash)
             st.rerun()
     else:
         if cols[6].button("Annuler", key=f"an_{rid}", use_container_width=True, type="secondary"):
@@ -654,12 +675,15 @@ for _, row in view_page.iterrows():
                 df.at[i, "checkin_time"] = ""
                 df.at[i, "checkin_by"] = ""
                 st.session_state.df = df
-                autosave_df(df, file_hash)  # ✅ autosave automatique
+                autosave_df(df, file_hash)
             st.rerun()
 
 pager(page_count, st.session_state.page, label="bottom")
 
-st.caption(f"Affichage : {start+1}-{min(end, total_rows)} / {total_rows}")
+if total_rows == 0:
+    st.caption("Affichage : 0 / 0")
+else:
+    st.caption(f"Affichage : {start+1}-{min(end, total_rows)} / {total_rows}")
 
 st.divider()
 
