@@ -369,13 +369,13 @@ st.divider()
 # =========================
 with st.sidebar:
     st.header("Réglages")
-    staff_name = st.text_input("Nom de l'agent (optionnel)", placeholder="Ex: Ambroise").strip()
-    st.caption("Sera enregistré dans la colonne checkin_by.")
+    staff_name = st.text_input("Nom de l'agent", placeholder="Ex: Doralis").strip()
+    st.caption("Sera enregistré dans la colonne checkin by")
     st.markdown("---")
     tablet_mode = st.toggle("Mode tablette (touch)", value=True)
     st.markdown("---")
-    st.caption("Fuseau horaire : **Europe/Paris** ✅")
-    st.caption("Sécurité : autosauvegarde automatique à chaque action ✅")
+    st.caption("Fuseau horaire : **Europe/Paris**")
+    st.caption("Autosauvegarde automatique")
 
 
 # =========================
