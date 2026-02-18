@@ -2,6 +2,7 @@
 import io
 import re
 import hashlib
+import html
 import unicodedata
 import urllib.parse
 from pathlib import Path
@@ -207,8 +208,46 @@ def try_load_autosave(file_hash: str) -> pd.DataFrame | None:
         df = sanitize_df(df)
         df = add_ids(df)
         return df
-    except Exception:
+    except Exception as err:
+        st.session_state["autosave_error"] = f"Autosauvegarde ignorée ({err.__class__.__name__})"
         return None
+
+
+def upsert_search_blob(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
+    """(Re)construit le blob de recherche si nécessaire."""
+    df = df.copy()
+    search_blob_key = "||".join(cols)
+    if "_search_blob" not in df.columns or df.attrs.get("search_blob_key") != search_blob_key:
+        df["_search_blob"] = build_search_blob(df, cols)
+        df.attrs["search_blob_key"] = search_blob_key
+    return df
+
+
+def set_presence(
+    df: pd.DataFrame,
+    rid: str,
+    present: bool,
+    staff_name: str,
+) -> pd.DataFrame:
+    """Applique un émargement/annulation sur une ligne identifiée par __id."""
+    idx = df.index[df["__id"] == rid]
+    if not len(idx):
+        return df
+
+    i = idx[0]
+    df = df.copy()
+    df.at[i, "present"] = present
+    if present:
+        df.at[i, "checkin_time"] = now_paris_str()
+        df.at[i, "checkin_by"] = staff_name if staff_name else "unknown"
+    else:
+        df.at[i, "checkin_time"] = ""
+        df.at[i, "checkin_by"] = ""
+    return df
+
+
+def escape_cell(value) -> str:
+    return html.escape(str(value or ""))
 
 
 def load_excel(uploaded_file) -> pd.DataFrame:
@@ -492,6 +531,10 @@ if "file_hash" not in st.session_state or st.session_state.get("file_hash") != f
         st.session_state.df = load_excel(uploaded)
         autosave_df(st.session_state.df, file_hash)
 
+autosave_error = st.session_state.pop("autosave_error", None)
+if autosave_error:
+    st.warning(autosave_error)
+
 df = st.session_state.df
 
 # =========================
@@ -565,9 +608,9 @@ if not display_cols:
 
 search_cols = list(dict.fromkeys(display_cols + [c for c in ["email", "company", "function"] if c in df.columns]))
 
-# Build search blob once (for fast AND-token filtering)
-if "_search_blob" not in df.columns:
-    df["_search_blob"] = build_search_blob(df, search_cols)
+# Build search blob if missing/outdated (for fast AND-token filtering)
+df = upsert_search_blob(df, search_cols)
+if not df.equals(st.session_state.df):
     st.session_state.df = df
     autosave_df(df, file_hash)
 
@@ -627,14 +670,9 @@ if auto_target_id:
 
     with cB:
         if st.button("✅ Émarger maintenant", key=f"quick_em_{auto_target_id}", use_container_width=True, type="primary"):
-            idx = df.index[df["__id"] == auto_target_id]
-            if len(idx):
-                i = idx[0]
-                df.at[i, "present"] = True
-                df.at[i, "checkin_time"] = now_paris_str()
-                df.at[i, "checkin_by"] = staff_name if staff_name else "unknown"
-                st.session_state.df = df
-                autosave_df(df, file_hash)
+            df = set_presence(df, auto_target_id, present=True, staff_name=staff_name)
+            st.session_state.df = df
+            autosave_df(df, file_hash)
             st.rerun()
 
     st.divider()
@@ -697,37 +735,33 @@ for _, row in view_page.iterrows():
     co = row.get("company", "")
     fu = row.get("function", "")
 
+    fn_safe = escape_cell(fn)
+    ln_safe = escape_cell(ln)
+    em_safe = escape_cell(em)
+    co_safe = escape_cell(co)
+    fu_safe = escape_cell(fu)
+
     cols = st.columns([2.2, 2.8, 3, 3, 3, 2, 2], vertical_alignment="center")
 
-    cols[0].markdown(f"<div class='cell-nowrap'>{fn}</div>", unsafe_allow_html=True)
-    cols[1].markdown(f"<div class='cell-nowrap'>{ln}</div>", unsafe_allow_html=True)
-    cols[2].markdown(f"<div class='cell-nowrap'>{em}</div>", unsafe_allow_html=True)
-    cols[3].markdown(f"<div class='cell-nowrap'>{co}</div>", unsafe_allow_html=True)
-    cols[4].markdown(f"<div class='cell-nowrap'>{fu}</div>", unsafe_allow_html=True)
+    cols[0].markdown(f"<div class='cell-nowrap'>{fn_safe}</div>", unsafe_allow_html=True)
+    cols[1].markdown(f"<div class='cell-nowrap'>{ln_safe}</div>", unsafe_allow_html=True)
+    cols[2].markdown(f"<div class='cell-nowrap'>{em_safe}</div>", unsafe_allow_html=True)
+    cols[3].markdown(f"<div class='cell-nowrap'>{co_safe}</div>", unsafe_allow_html=True)
+    cols[4].markdown(f"<div class='cell-nowrap'>{fu_safe}</div>", unsafe_allow_html=True)
 
     cols[5].markdown(badge_html(is_present), unsafe_allow_html=True)
 
     if not is_present:
         if cols[6].button("Émarger", key=f"em_{rid}", use_container_width=True, type="primary"):
-            idx = df.index[df["__id"] == rid]
-            if len(idx):
-                i = idx[0]
-                df.at[i, "present"] = True
-                df.at[i, "checkin_time"] = now_paris_str()
-                df.at[i, "checkin_by"] = staff_name if staff_name else "unknown"
-                st.session_state.df = df
-                autosave_df(df, file_hash)
+            df = set_presence(df, rid, present=True, staff_name=staff_name)
+            st.session_state.df = df
+            autosave_df(df, file_hash)
             st.rerun()
     else:
         if cols[6].button("Annuler", key=f"an_{rid}", use_container_width=True, type="secondary"):
-            idx = df.index[df["__id"] == rid]
-            if len(idx):
-                i = idx[0]
-                df.at[i, "present"] = False
-                df.at[i, "checkin_time"] = ""
-                df.at[i, "checkin_by"] = ""
-                st.session_state.df = df
-                autosave_df(df, file_hash)
+            df = set_presence(df, rid, present=False, staff_name=staff_name)
+            st.session_state.df = df
+            autosave_df(df, file_hash)
             st.rerun()
 
 pager(page_count, st.session_state.page, label="bottom")
