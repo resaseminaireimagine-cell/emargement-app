@@ -442,7 +442,7 @@ st.divider()
 # =========================
 with st.sidebar:
     st.header("Démarrage")
-    staff_name = st.text_input("Nom de l’agent", placeholder="Ex: Doralis").strip()
+    staff_name = st.text_input("Nom de l’agent", placeholder="Ex: Léa").strip()
     event_code = st.text_input("Code évènement", placeholder="Ex: JUBILE_2026-03-12").strip()
 
     autosave_mode_label = st.radio("Autosauvegarde", ["Partagée (équipe)", "Par agent"], index=0)
