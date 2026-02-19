@@ -1,6 +1,9 @@
-# app.py
+# app.py (version autonome : pas de Cloudbox, reprise via lien)
 import io
 import re
+import json
+import zlib
+import base64
 import hashlib
 import unicodedata
 import urllib.parse
@@ -21,24 +24,11 @@ PRIMARY = "#C4007A"
 BG = "#F6F7FB"
 TEXT = "#111827"
 MUTED = "#6B7280"
-
 PARIS_TZ = ZoneInfo("Europe/Paris")
 
 MAIL_TO = "evenements@institutimagine.org"
 
-# Autosave "self-contained" : sur le serveur (pas sur le PC)
-AUTOSAVE_DIR = Path("./autosave")
-AUTOSAVE_DIR.mkdir(parents=True, exist_ok=True)
-
-# Colonnes internes à ne JAMAIS exporter/sauver
-INTERNAL_COLS = {"__id", "__base_id", "_search_blob", "_score"}
-
-LOGO_CANDIDATES = [
-    "logo_rose.png",
-    "LOGO ROSE.png",
-    "LOGO_ROSE.png",
-    "logo.png",
-]
+LOGO_CANDIDATES = ["logo_rose.png", "LOGO ROSE.png", "LOGO_ROSE.png", "logo.png"]
 
 ALIASES = {
     "first_name": ["first_name", "firstname", "first name", "given name", "given_name", "prenom", "prénom"],
@@ -52,6 +42,8 @@ ALIASES = {
 }
 STANDARD_ORDER = ["first_name", "last_name", "email", "company", "function"]
 PRESENT_TRUE = {"true", "1", "yes", "oui", "vrai", "x", "present", "présent"}
+
+INTERNAL_COLS = {"__id", "__base_id", "_search_blob", "_score"}
 
 
 # =========================
@@ -73,10 +65,8 @@ def fold_text(s: str) -> str:
     s = "" if s is None else str(s)
     s = s.replace("\u00A0", " ").replace("\t", " ").replace("\n", " ")
     s = s.strip().lower()
-
     s = unicodedata.normalize("NFKD", s)
     s = "".join(ch for ch in s if not unicodedata.combining(ch))
-
     s = re.sub(r"[’'`´-]+", " ", s)
     s = re.sub(r"[^a-z0-9 ]+", " ", s)
     s = re.sub(r"\s+", " ", s).strip()
@@ -86,12 +76,6 @@ def fold_text(s: str) -> str:
 def query_tokens(q: str) -> list[str]:
     qf = fold_text(q)
     return [t for t in qf.split(" ") if t]
-
-
-def slugify(s: str) -> str:
-    s = fold_text(s).replace(" ", "_")
-    s = re.sub(r"[^a-z0-9_]+", "_", s).strip("_")
-    return s or "event"
 
 
 def find_logo_path() -> str | None:
@@ -306,48 +290,50 @@ def mailto_link(to: str, subject: str, body: str) -> str:
 
 
 # =========================
-# AUTOSAVE (SERVER LOCAL)
+# STATE PACKING (reprise via URL)
 # =========================
-def autosave_key(event_code: str, file_hash: str, mode: str, staff_name: str) -> str:
-    # stable, sans slash
-    ev = slugify(event_code)
-    if mode == "per_agent":
-        ag = slugify(staff_name) if staff_name else "unknown"
-        return f"{ev}__{file_hash}__agent_{ag}"
-    return f"{ev}__{file_hash}__shared"
+def state_pack(state: dict) -> str:
+    raw = json.dumps(state, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    comp = zlib.compress(raw, level=9)
+    return base64.urlsafe_b64encode(comp).decode("ascii").rstrip("=")
 
 
-def autosave_path(key: str) -> Path:
-    return AUTOSAVE_DIR / f"autosave__{key}.csv"
-
-
-def autosave_df(df: pd.DataFrame, key: str) -> None:
-    p = autosave_path(key)
-    export_df = drop_internal(df).copy()
-    export_df.to_csv(p, index=False, sep=";", encoding="utf-8-sig")
-
-
-def try_load_autosave(key: str) -> pd.DataFrame | None:
-    p = autosave_path(key)
-    if not p.exists():
-        return None
+def state_unpack(token: str) -> dict | None:
     try:
-        df = pd.read_csv(p, sep=";", encoding="utf-8-sig")
-        df = standardize_columns(df)
-        df = ensure_internal_columns(df)
-        df = sanitize_df(df)
-        df = add_ids(df)
-        return df
+        pad = "=" * (-len(token) % 4)
+        comp = base64.urlsafe_b64decode((token + pad).encode("ascii"))
+        raw = zlib.decompress(comp)
+        return json.loads(raw.decode("utf-8"))
     except Exception:
         return None
 
 
-def delete_autosave(key: str) -> bool:
-    p = autosave_path(key)
-    if p.exists():
-        p.unlink()
-        return True
-    return False
+def snapshot_from_df(df: pd.DataFrame) -> dict:
+    # on ne stocke que ce qui change (présence + horodatage + agent) par base_id
+    snap = {}
+    for _, r in df.iterrows():
+        bid = r.get("__base_id", "")
+        if not bid:
+            continue
+        snap[bid] = {
+            "p": bool(r.get("present", False)),
+            "t": str(r.get("checkin_time", "")),
+            "b": str(r.get("checkin_by", "")),
+        }
+    return snap
+
+
+def apply_snapshot(df: pd.DataFrame, snap: dict) -> pd.DataFrame:
+    df = df.copy()
+    if "__base_id" not in df.columns:
+        return df
+    for i, r in df.iterrows():
+        bid = r.get("__base_id", "")
+        if bid in snap:
+            df.at[i, "present"] = bool(snap[bid].get("p", False))
+            df.at[i, "checkin_time"] = str(snap[bid].get("t", ""))
+            df.at[i, "checkin_by"] = str(snap[bid].get("b", ""))
+    return df
 
 
 # =========================
@@ -434,73 +420,69 @@ with c1:
         st.image(logo_path, width=90)
 with c2:
     st.markdown(f"## {APP_TITLE}")
-    st.caption("1) Saisir agent + code évènement • 2) Importer Excel • 3) Rechercher • 4) Émarger • 5) Exporter")
+    st.caption("Importer • Rechercher • Émarger • Exporter • (Reprise via lien)")
 st.divider()
 
 # =========================
-# SIDEBAR (simplifiée)
+# SIDEBAR
 # =========================
 with st.sidebar:
     st.header("Démarrage")
     staff_name = st.text_input("Nom de l’agent", placeholder="Ex: Léa").strip()
     event_code = st.text_input("Code évènement", placeholder="Ex: JUBILE_2026-03-12").strip()
-
-    autosave_mode_label = st.radio("Autosauvegarde", ["Partagée (équipe)", "Par agent"], index=0)
-    autosave_mode = "shared" if autosave_mode_label.startswith("Partagée") else "per_agent"
-
-    st.caption("Astuce : si vous ne savez pas, laissez “Partagée (équipe)”.")
-    st.markdown("---")
     tablet_mode = st.toggle("Mode tablette (touch)", value=True)
+
+    st.markdown("---")
+    st.subheader("Reprise")
+    st.caption("Optionnel : collez un lien de reprise (token) pour récupérer l’état.")
+    resume_token = st.text_area("Token de reprise", height=68, placeholder="Collez ici si besoin").strip()
+    if st.button("Charger le token", use_container_width=True):
+        st.session_state["_resume_token"] = resume_token
+        st.toast("Token chargé ✅", icon="✅")
+        st.rerun()
 
 if not staff_name:
     st.info("➡️ Saisissez le **Nom de l’agent** pour commencer.")
     st.stop()
 
-# =========================
-# UPLOAD + AUTO-RESTORE
-# =========================
 uploaded = st.file_uploader("Importer un fichier Excel (.xlsx)", type=["xlsx"])
 if uploaded is None:
     st.info("Importez un fichier Excel pour commencer.")
     st.stop()
 
 file_hash = hash_uploaded_file(uploaded)
-event_code_effective = event_code or Path(uploaded.name).stem or "event"
-key = autosave_key(event_code_effective, file_hash, autosave_mode, staff_name)
 
-# Fin d’évènement : purge autosave
-if st.button("🧹 Fin d’évènement : effacer l’autosauvegarde", use_container_width=True):
-    delete_autosave(key)
-    st.session_state.pop("file_hash", None)
-    st.session_state.pop("df", None)
-    st.success("Autosauvegarde effacée.")
-    st.rerun()
-
-# init / reload if file changes
 if "file_hash" not in st.session_state or st.session_state.get("file_hash") != file_hash:
     st.session_state.file_hash = file_hash
     st.session_state.filename = uploaded.name
     st.session_state.page = 1
     st.session_state["_prev_query"] = ""
-    st.session_state["_prev_page_size"] = None
 
-    restored = try_load_autosave(key)
-    if restored is not None:
-        st.session_state.df = restored
-        st.toast("Autosauvegarde restaurée ✅", icon="✅")
-    else:
-        st.session_state.df = load_excel(uploaded)
-        autosave_df(st.session_state.df, key)
+    df = load_excel(uploaded)
+
+    # Applique token de reprise si présent
+    token = st.session_state.get("_resume_token", "") or st.query_params.get("r", "")
+    if token:
+        payload = state_unpack(token)
+        if payload and payload.get("h") == file_hash:
+            df = apply_snapshot(df, payload.get("s", {}))
+            st.toast("Reprise appliquée ✅", icon="✅")
+        else:
+            st.toast("Token invalide / mauvais fichier", icon="⚠️")
+
+    st.session_state.df = df
 
 df = st.session_state.df
 
-st.caption("💾 Autosauvegarde : enregistrée automatiquement pendant l’émargement.")
-st.caption(f"🗂️ Évènement : **{event_code_effective}** • Mode : **{autosave_mode_label}**")
+# Token de reprise actuel (basé sur l’état)
+snap = snapshot_from_df(df)
+packed = state_pack({"h": file_hash, "s": snap})
+st.query_params["r"] = packed
+
+st.caption("🔁 Reprise : le lien de la page contient l’état. (Copiez l’URL pour reprendre ailleurs.)")
 st.divider()
 
-# =========================
-# DASHBOARD
-# =========================
+# Dashboard
 total = len(df)
 present_count = int(df["present"].sum())
 remaining = total - present_count
@@ -520,9 +502,7 @@ donut = (
 st.altair_chart(donut, use_container_width=True)
 st.divider()
 
-# =========================
-# KPI + SEARCH + FILTERS
-# =========================
+# Search + filters
 k1, k2, k3, k4 = st.columns([1, 1, 1, 2], vertical_alignment="center")
 k1.metric("Participants", total)
 k2.metric("Présents", present_count)
@@ -536,35 +516,25 @@ if query != prev_q:
 st.session_state["_prev_query"] = query
 
 filter_choice = st.radio("Filtre", ["Non émargés", "Tous", "Présents uniquement"], index=0, horizontal=True)
-st.caption("Astuce : tape 'dupont jean' ou 'jean dupont' (accents/apostrophes ignorés).")
 st.divider()
 
-# =========================
-# VIEW FILTER + SORT
-# =========================
+# View
 display_cols = [c for c in STANDARD_ORDER if c in df.columns]
 if not display_cols:
-    display_cols = [
-        c for c in df.columns
-        if c not in ["present", "checkin_time", "checkin_by", "__id", "__base_id", "_search_blob"]
-    ][:4]
-
+    display_cols = [c for c in df.columns if c not in ["present", "checkin_time", "checkin_by", "__id", "__base_id", "_search_blob"]][:4]
 search_cols = list(dict.fromkeys(display_cols + [c for c in ["email", "company", "function"] if c in df.columns]))
 
 if "_search_blob" not in df.columns:
     df["_search_blob"] = build_search_blob(df, search_cols)
     st.session_state.df = df
-    autosave_df(df, key)
 
 view = df.copy()
-
 if query.strip():
     toks = query_tokens(query)
     mask = pd.Series(True, index=view.index)
     for t in toks:
         mask &= view["_search_blob"].str.contains(re.escape(t), na=False, regex=True)
     view = view[mask].copy()
-
     view["_score"] = view.apply(lambda r: relevance_score_row(r, query), axis=1)
     view = view.sort_values(by=["_score"], ascending=False, kind="stable")
 else:
@@ -576,56 +546,7 @@ if filter_choice == "Présents uniquement":
 elif filter_choice == "Non émargés":
     view = view[view["present"] == False].copy()
 
-auto_target_id = None
-if query.strip():
-    candidates = view[view["present"] == False]
-    if len(candidates) == 1:
-        auto_target_id = candidates.iloc[0]["__id"]
-
-# =========================
-# QUICK TARGET CARD
-# =========================
-if auto_target_id:
-    target_row = df[df["__id"] == auto_target_id].iloc[0]
-    st.markdown("### 🎯 Participant trouvé")
-    cA, cB = st.columns([5, 2], vertical_alignment="center")
-
-    with cA:
-        st.markdown(
-            f"""
-            <div style="background:white;border-radius:16px;padding:14px 16px;
-                        box-shadow:0 1px 12px rgba(0,0,0,0.06);">
-              <div style="font-weight:900;font-size:1.15rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">
-                {target_row.get("first_name","")} {target_row.get("last_name","")}
-              </div>
-              <div style="color:{MUTED};margin-top:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">
-                {target_row.get("email","")} • {target_row.get("company","")} • {target_row.get("function","")}
-              </div>
-              <div style="margin-top:10px;">
-                <span class='badge-todo'>À émarger</span>
-              </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    with cB:
-        if st.button("✅ Émarger maintenant", key=f"quick_em_{auto_target_id}", use_container_width=True, type="primary"):
-            idx = df.index[df["__id"] == auto_target_id]
-            if len(idx):
-                i = idx[0]
-                df.at[i, "present"] = True
-                df.at[i, "checkin_time"] = now_paris_str()
-                df.at[i, "checkin_by"] = staff_name
-                st.session_state.df = df
-                autosave_df(df, key)
-            st.rerun()
-
-    st.divider()
-
-# =========================
-# PAGINATION
-# =========================
+# Pagination
 PAGE_SIZE_OPTIONS = [25, 50, 75, 100]
 default_page_size = 25 if tablet_mode else 50
 PAGE_SIZE = st.selectbox("Participants par page", PAGE_SIZE_OPTIONS, index=PAGE_SIZE_OPTIONS.index(default_page_size), key="page_size")
@@ -635,16 +556,12 @@ page_count = max(1, (total_rows + PAGE_SIZE - 1) // PAGE_SIZE)
 st.session_state.page = min(max(1, st.session_state.get("page", 1)), page_count)
 
 pager(page_count, st.session_state.page, label="top")
-
 start = (st.session_state.page - 1) * PAGE_SIZE
 end = start + PAGE_SIZE
 view_page = view.iloc[start:end].copy()
 
-# =========================
-# LIST
-# =========================
+# List
 st.subheader("Liste des participants")
-
 header = st.columns([2.2, 2.8, 3, 3, 3, 2, 2], vertical_alignment="center")
 header[0].markdown("**Prénom**")
 header[1].markdown("**Nom**")
@@ -670,7 +587,6 @@ for _, row in view_page.iterrows():
     cols[2].markdown(f"<div class='cell-nowrap'>{em}</div>", unsafe_allow_html=True)
     cols[3].markdown(f"<div class='cell-nowrap'>{co}</div>", unsafe_allow_html=True)
     cols[4].markdown(f"<div class='cell-nowrap'>{fu}</div>", unsafe_allow_html=True)
-
     cols[5].markdown(badge_html(is_present), unsafe_allow_html=True)
 
     if not is_present:
@@ -682,7 +598,6 @@ for _, row in view_page.iterrows():
                 df.at[i, "checkin_time"] = now_paris_str()
                 df.at[i, "checkin_by"] = staff_name
                 st.session_state.df = df
-                autosave_df(df, key)
             st.rerun()
     else:
         if cols[6].button("Annuler", key=f"an_{rid}", use_container_width=True, type="secondary"):
@@ -693,41 +608,28 @@ for _, row in view_page.iterrows():
                 df.at[i, "checkin_time"] = ""
                 df.at[i, "checkin_by"] = ""
                 st.session_state.df = df
-                autosave_df(df, key)
             st.rerun()
 
 pager(page_count, st.session_state.page, label="bottom")
 st.caption("Affichage : 0 / 0" if total_rows == 0 else f"Affichage : {start+1}-{min(end, total_rows)} / {total_rows}")
 st.divider()
 
-# =========================
-# EXPORTS
-# =========================
+# Exports
 st.subheader("Exports")
-
 csv_all, csv_present, xlsx_all = build_exports(df)
-
 e1, e2, e3 = st.columns([1, 1, 1], vertical_alignment="center")
 with e1:
     st.download_button("⬇️ CSV (Excel FR)", data=csv_all, file_name="emargement_export.csv", mime="text/csv", use_container_width=True)
 with e2:
     st.download_button("⬇️ CSV (présents)", data=csv_present, file_name="emargement_presents.csv", mime="text/csv", use_container_width=True)
 with e3:
-    st.download_button(
-        "⬇️ Excel (.xlsx)",
-        data=xlsx_all,
-        file_name="emargement_export.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True,
-    )
+    st.download_button("⬇️ Excel (.xlsx)", data=xlsx_all, file_name="emargement_export.xlsx",
+                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
 
 st.divider()
 
-# =========================
-# EMAIL
-# =========================
+# Email helper (mailto)
 st.subheader("Envoyer les exports par email")
-
 export_df = drop_internal(df).copy()
 present_only = export_df[export_df["present"] == True].copy()
 not_present_only = export_df[export_df["present"] == False].copy()
@@ -739,7 +641,7 @@ st.download_button("⬇️ CSV (présents) pour email", data=csv_present_bytes, 
 st.download_button("⬇️ CSV (non émargés) pour email", data=csv_not_present_bytes, file_name="emargement_non_emarges.csv", mime="text/csv", use_container_width=True)
 
 ts = datetime.now(PARIS_TZ).strftime("%Y-%m-%d_%H%M")
-subject = f"[Émargement] {event_code_effective} — présents / non émargés — {ts}"
+subject = f"[Émargement] {event_code or Path(uploaded.name).stem} — présents / non émargés — {ts}"
 body = (
     "Bonjour,\n\n"
     "Veuillez trouver en pièces jointes :\n"
@@ -748,14 +650,12 @@ body = (
     "Pièces jointes à ajouter :\n"
     "1) emargement_presents.csv\n"
     "2) emargement_non_emarges.csv\n\n"
-    f"Évènement : {event_code_effective}\n"
     f"Agent : {staff_name}\n"
-    f"Fichier importé : {st.session_state.get('filename','')}\n"
+    f"Fichier : {st.session_state.get('filename','')}\n"
     f"Horodatage : {now_paris_str()} (Europe/Paris)\n"
 )
 
 link = mailto_link(MAIL_TO, subject, body)
-
 st.markdown(
     f"""
     <a href="{link}">
