@@ -1,4 +1,5 @@
-# app.py (version autonome : pas de Cloudbox, reprise via lien)
+# app.py — version finale autonome (sans Cloudbox), reprise via lien, UI épurée
+
 import io
 import re
 import json
@@ -290,7 +291,7 @@ def mailto_link(to: str, subject: str, body: str) -> str:
 
 
 # =========================
-# STATE PACKING (reprise via URL)
+# REPRISE VIA LIEN (paramètre r)
 # =========================
 def state_pack(state: dict) -> str:
     raw = json.dumps(state, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
@@ -309,17 +310,12 @@ def state_unpack(token: str) -> dict | None:
 
 
 def snapshot_from_df(df: pd.DataFrame) -> dict:
-    # on ne stocke que ce qui change (présence + horodatage + agent) par base_id
     snap = {}
     for _, r in df.iterrows():
         bid = r.get("__base_id", "")
         if not bid:
             continue
-        snap[bid] = {
-            "p": bool(r.get("present", False)),
-            "t": str(r.get("checkin_time", "")),
-            "b": str(r.get("checkin_by", "")),
-        }
+        snap[bid] = {"p": bool(r.get("present", False)), "t": str(r.get("checkin_time", "")), "b": str(r.get("checkin_by", ""))}
     return snap
 
 
@@ -336,14 +332,30 @@ def apply_snapshot(df: pd.DataFrame, snap: dict) -> pd.DataFrame:
     return df
 
 
+def extract_r(value: str) -> str:
+    value = (value or "").strip()
+    if not value:
+        return ""
+    if "?" in value and "r=" in value:
+        try:
+            qs = value.split("?", 1)[1]
+            params = urllib.parse.parse_qs(qs)
+            if "r" in params and params["r"]:
+                return params["r"][0].strip()
+        except Exception:
+            pass
+    return value
+
+
 # =========================
 # PAGE CONFIG + CSS
 # =========================
 st.set_page_config(page_title=APP_TITLE, layout="wide")
 
-st.markdown("""
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;600;700;800;900&display=swap">
-""", unsafe_allow_html=True)
+st.markdown(
+    """<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;600;700;800;900&display=swap">""",
+    unsafe_allow_html=True,
+)
 
 css = f"""
 <style>
@@ -368,7 +380,7 @@ h1, h2, h3, h4 {{ color: {TEXT}; }}
   box-shadow: 0 1px 12px rgba(0,0,0,0.06);
 }}
 
-.stTextInput input {{
+.stTextInput input, .stTextArea textarea {{
   border-radius: 14px;
   padding: 0.7rem 0.9rem;
   font-size: 1.0rem;
@@ -420,29 +432,26 @@ with c1:
         st.image(logo_path, width=90)
 with c2:
     st.markdown(f"## {APP_TITLE}")
-    st.caption("Importer • Rechercher • Émarger • Exporter • (Reprise via lien)")
 st.divider()
 
 # =========================
-# SIDEBAR
+# SIDEBAR (épure)
 # =========================
 with st.sidebar:
     st.header("Démarrage")
-    staff_name = st.text_input("Nom de l’agent", placeholder="Ex: Léa").strip()
-    event_code = st.text_input("Code évènement", placeholder="Ex: JUBILE_2026-03-12").strip()
+    staff_name = st.text_input("Nom de l’agent", placeholder="Doralis").strip()
+    event_code = st.text_input("Code évènement", placeholder="Séminaire ...").strip()
     tablet_mode = st.toggle("Mode tablette (touch)", value=True)
 
     st.markdown("---")
-    st.subheader("Reprise")
-    st.caption("Optionnel : collez un lien de reprise (token) pour récupérer l’état.")
-    resume_token = st.text_area("Token de reprise", height=68, placeholder="Collez ici si besoin").strip()
-    if st.button("Charger le token", use_container_width=True):
-        st.session_state["_resume_token"] = resume_token
-        st.toast("Token chargé ✅", icon="✅")
+    st.header("Reprise")
+    reprise_input = st.text_area("", height=68, placeholder="Coller un lien de reprise").strip()
+    if st.button("Charger", use_container_width=True):
+        st.session_state["_resume_r"] = extract_r(reprise_input)
         st.rerun()
 
 if not staff_name:
-    st.info("➡️ Saisissez le **Nom de l’agent** pour commencer.")
+    st.info("Saisissez le nom de l’agent pour commencer.")
     st.stop()
 
 uploaded = st.file_uploader("Importer un fichier Excel (.xlsx)", type=["xlsx"])
@@ -452,6 +461,9 @@ if uploaded is None:
 
 file_hash = hash_uploaded_file(uploaded)
 
+# =========================
+# LOAD + APPLY REPRISE
+# =========================
 if "file_hash" not in st.session_state or st.session_state.get("file_hash") != file_hash:
     st.session_state.file_hash = file_hash
     st.session_state.filename = uploaded.name
@@ -460,49 +472,27 @@ if "file_hash" not in st.session_state or st.session_state.get("file_hash") != f
 
     df = load_excel(uploaded)
 
-    # Applique token de reprise si présent
-    token = st.session_state.get("_resume_token", "") or st.query_params.get("r", "")
-    if token:
-        payload = state_unpack(token)
+    r = st.session_state.get("_resume_r", "") or st.query_params.get("r", "")
+    if r:
+        payload = state_unpack(r)
         if payload and payload.get("h") == file_hash:
             df = apply_snapshot(df, payload.get("s", {}))
-            st.toast("Reprise appliquée ✅", icon="✅")
-        else:
-            st.toast("Token invalide / mauvais fichier", icon="⚠️")
 
     st.session_state.df = df
 
 df = st.session_state.df
 
-# Token de reprise actuel (basé sur l’état)
-snap = snapshot_from_df(df)
-packed = state_pack({"h": file_hash, "s": snap})
+# maj de l'URL à chaque rerun (reprise)
+packed = state_pack({"h": file_hash, "s": snapshot_from_df(df)})
 st.query_params["r"] = packed
 
-st.caption("🔁 Reprise : le lien de la page contient l’état. (Copiez l’URL pour reprendre ailleurs.)")
-st.divider()
-
-# Dashboard
+# =========================
+# DASHBOARD
+# =========================
 total = len(df)
 present_count = int(df["present"].sum())
 remaining = total - present_count
 
-st.subheader("Tableau de bord")
-progress_df = pd.DataFrame({"Statut": ["Présents", "Restants"], "Nombre": [present_count, remaining]})
-donut = (
-    alt.Chart(progress_df)
-    .mark_arc(innerRadius=70)
-    .encode(
-        theta=alt.Theta("Nombre:Q"),
-        color=alt.Color("Statut:N", legend=alt.Legend(title=None)),
-        tooltip=["Statut:N", "Nombre:Q"],
-    )
-    .properties(height=240)
-)
-st.altair_chart(donut, use_container_width=True)
-st.divider()
-
-# Search + filters
 k1, k2, k3, k4 = st.columns([1, 1, 1, 2], vertical_alignment="center")
 k1.metric("Participants", total)
 k2.metric("Présents", present_count)
@@ -518,7 +508,9 @@ st.session_state["_prev_query"] = query
 filter_choice = st.radio("Filtre", ["Non émargés", "Tous", "Présents uniquement"], index=0, horizontal=True)
 st.divider()
 
-# View
+# =========================
+# VIEW FILTER + SORT
+# =========================
 display_cols = [c for c in STANDARD_ORDER if c in df.columns]
 if not display_cols:
     display_cols = [c for c in df.columns if c not in ["present", "checkin_time", "checkin_by", "__id", "__base_id", "_search_blob"]][:4]
@@ -529,6 +521,7 @@ if "_search_blob" not in df.columns:
     st.session_state.df = df
 
 view = df.copy()
+
 if query.strip():
     toks = query_tokens(query)
     mask = pd.Series(True, index=view.index)
@@ -546,7 +539,9 @@ if filter_choice == "Présents uniquement":
 elif filter_choice == "Non émargés":
     view = view[view["present"] == False].copy()
 
-# Pagination
+# =========================
+# PAGINATION
+# =========================
 PAGE_SIZE_OPTIONS = [25, 50, 75, 100]
 default_page_size = 25 if tablet_mode else 50
 PAGE_SIZE = st.selectbox("Participants par page", PAGE_SIZE_OPTIONS, index=PAGE_SIZE_OPTIONS.index(default_page_size), key="page_size")
@@ -556,12 +551,16 @@ page_count = max(1, (total_rows + PAGE_SIZE - 1) // PAGE_SIZE)
 st.session_state.page = min(max(1, st.session_state.get("page", 1)), page_count)
 
 pager(page_count, st.session_state.page, label="top")
+
 start = (st.session_state.page - 1) * PAGE_SIZE
 end = start + PAGE_SIZE
 view_page = view.iloc[start:end].copy()
 
-# List
+# =========================
+# LIST
+# =========================
 st.subheader("Liste des participants")
+
 header = st.columns([2.2, 2.8, 3, 3, 3, 2, 2], vertical_alignment="center")
 header[0].markdown("**Prénom**")
 header[1].markdown("**Nom**")
@@ -587,6 +586,7 @@ for _, row in view_page.iterrows():
     cols[2].markdown(f"<div class='cell-nowrap'>{em}</div>", unsafe_allow_html=True)
     cols[3].markdown(f"<div class='cell-nowrap'>{co}</div>", unsafe_allow_html=True)
     cols[4].markdown(f"<div class='cell-nowrap'>{fu}</div>", unsafe_allow_html=True)
+
     cols[5].markdown(badge_html(is_present), unsafe_allow_html=True)
 
     if not is_present:
@@ -611,25 +611,42 @@ for _, row in view_page.iterrows():
             st.rerun()
 
 pager(page_count, st.session_state.page, label="bottom")
-st.caption("Affichage : 0 / 0" if total_rows == 0 else f"Affichage : {start+1}-{min(end, total_rows)} / {total_rows}")
+
+if total_rows == 0:
+    st.caption("Affichage : 0 / 0")
+else:
+    st.caption(f"Affichage : {start+1}-{min(end, total_rows)} / {total_rows}")
+
 st.divider()
 
-# Exports
+# =========================
+# EXPORTS
+# =========================
 st.subheader("Exports")
+
 csv_all, csv_present, xlsx_all = build_exports(df)
+
 e1, e2, e3 = st.columns([1, 1, 1], vertical_alignment="center")
 with e1:
     st.download_button("⬇️ CSV (Excel FR)", data=csv_all, file_name="emargement_export.csv", mime="text/csv", use_container_width=True)
 with e2:
     st.download_button("⬇️ CSV (présents)", data=csv_present, file_name="emargement_presents.csv", mime="text/csv", use_container_width=True)
 with e3:
-    st.download_button("⬇️ Excel (.xlsx)", data=xlsx_all, file_name="emargement_export.xlsx",
-                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
+    st.download_button(
+        "⬇️ Excel (.xlsx)",
+        data=xlsx_all,
+        file_name="emargement_export.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+    )
 
 st.divider()
 
-# Email helper (mailto)
+# =========================
+# EMAIL
+# =========================
 st.subheader("Envoyer les exports par email")
+
 export_df = drop_internal(df).copy()
 present_only = export_df[export_df["present"] == True].copy()
 not_present_only = export_df[export_df["present"] == False].copy()
@@ -656,6 +673,7 @@ body = (
 )
 
 link = mailto_link(MAIL_TO, subject, body)
+
 st.markdown(
     f"""
     <a href="{link}">
@@ -673,5 +691,5 @@ st.markdown(
       </button>
     </a>
     """,
-    unsafe_allow_html=True
+    unsafe_allow_html=True,
 )
