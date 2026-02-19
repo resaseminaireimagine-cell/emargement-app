@@ -1,4 +1,4 @@
-# app.py — version finale autonome (sans Cloudbox), reprise via lien, UI épurée
+# app.py — version finale autonome (sans Cloudbox), UI épurée
 
 import io
 import re
@@ -264,23 +264,6 @@ def build_exports(df: pd.DataFrame) -> tuple[bytes, bytes, bytes]:
     return csv_all, csv_present, xlsx
 
 
-def pager(page_count: int, page_value: int, label: str):
-    c_prev, c_info, c_next = st.columns([1, 2, 1], vertical_alignment="center")
-    with c_prev:
-        if st.button("Page précédente", disabled=(page_value <= 1), key=f"prev_{label}", use_container_width=True):
-            st.session_state.page = max(1, page_value - 1)
-            st.rerun()
-    with c_info:
-        st.markdown(
-            f"<div style='text-align:center; font-weight:800; padding:0.35rem 0;'>Page {page_value} / {page_count}</div>",
-            unsafe_allow_html=True,
-        )
-    with c_next:
-        if st.button("Page suivante", disabled=(page_value >= page_count), key=f"next_{label}", use_container_width=True):
-            st.session_state.page = min(page_count, page_value + 1)
-            st.rerun()
-
-
 def badge_html(is_present: bool) -> str:
     return "<span class='badge-present'>✔ Présent</span>" if is_present else "<span class='badge-todo'>À émarger</span>"
 
@@ -291,7 +274,7 @@ def mailto_link(to: str, subject: str, body: str) -> str:
 
 
 # =========================
-# REPRISE VIA LIEN (paramètre r)
+# REPRISE SILENCIEUSE VIA URL (paramètre r)
 # =========================
 def state_pack(state: dict) -> str:
     raw = json.dumps(state, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
@@ -315,7 +298,11 @@ def snapshot_from_df(df: pd.DataFrame) -> dict:
         bid = r.get("__base_id", "")
         if not bid:
             continue
-        snap[bid] = {"p": bool(r.get("present", False)), "t": str(r.get("checkin_time", "")), "b": str(r.get("checkin_by", ""))}
+        snap[bid] = {
+            "p": bool(r.get("present", False)),
+            "t": str(r.get("checkin_time", "")),
+            "b": str(r.get("checkin_by", "")),
+        }
     return snap
 
 
@@ -332,21 +319,6 @@ def apply_snapshot(df: pd.DataFrame, snap: dict) -> pd.DataFrame:
     return df
 
 
-def extract_r(value: str) -> str:
-    value = (value or "").strip()
-    if not value:
-        return ""
-    if "?" in value and "r=" in value:
-        try:
-            qs = value.split("?", 1)[1]
-            params = urllib.parse.parse_qs(qs)
-            if "r" in params and params["r"]:
-                return params["r"][0].strip()
-        except Exception:
-            pass
-    return value
-
-
 # =========================
 # PAGE CONFIG + CSS
 # =========================
@@ -361,9 +333,6 @@ css = f"""
 <style>
 :root {{ --font: 'Montserrat', sans-serif; }}
 html, body, .stApp, [class*="css"] {{ font-family: var(--font) !important; }}
-h1, h2, h3, h4, h5, h6,
-.stMarkdown, .stMarkdown *, .stCaption, small, p, label, span, div,
-button, input, textarea {{ font-family: var(--font) !important; }}
 
 header[data-testid="stHeader"] {{ display: none; }}
 
@@ -380,28 +349,39 @@ h1, h2, h3, h4 {{ color: {TEXT}; }}
   box-shadow: 0 1px 12px rgba(0,0,0,0.06);
 }}
 
-.stTextInput input, .stTextArea textarea {{
+.stTextInput input {{
   border-radius: 14px;
   padding: 0.7rem 0.9rem;
   font-size: 1.0rem;
 }}
 
+/* Boutons */
 .stButton > button {{
-  background-color: {PRIMARY} !important;
-  color: #ffffff !important;
-  border: none !important;
   border-radius: 14px !important;
   padding: 0.85rem 1.05rem !important;
   font-weight: 900 !important;
   min-height: 52px !important;
   white-space: nowrap !important;
 }}
-.stButton > button * {{ color: #ffffff !important; }}
 
-button[kind="secondary"], .stButton > button[kind="secondary"] {{
+/* Primary */
+.stButton > button:not([kind="secondary"]) {{
+  background-color: {PRIMARY} !important;
+  color: #ffffff !important;
+  border: none !important;
+}}
+.stButton > button:not([kind="secondary"]) * {{
+  color: #ffffff !important;
+}}
+
+/* Secondary */
+.stButton > button[kind="secondary"] {{
   background: #ffffff !important;
   color: {PRIMARY} !important;
   border: 2px solid {PRIMARY} !important;
+}}
+.stButton > button[kind="secondary"] * {{
+  color: {PRIMARY} !important;
 }}
 
 .badge-present {{
@@ -435,20 +415,13 @@ with c2:
 st.divider()
 
 # =========================
-# SIDEBAR (épure)
+# SIDEBAR (Démarrage seulement)
 # =========================
 with st.sidebar:
     st.header("Démarrage")
     staff_name = st.text_input("Nom de l’agent", placeholder="Doralis").strip()
     event_code = st.text_input("Code évènement", placeholder="Séminaire ...").strip()
     tablet_mode = st.toggle("Mode tablette (touch)", value=True)
-
-    st.markdown("---")
-    st.header("Reprise")
-    reprise_input = st.text_area("", height=68, placeholder="Coller un lien de reprise").strip()
-    if st.button("Charger", use_container_width=True):
-        st.session_state["_resume_r"] = extract_r(reprise_input)
-        st.rerun()
 
 if not staff_name:
     st.info("Saisissez le nom de l’agent pour commencer.")
@@ -462,7 +435,7 @@ if uploaded is None:
 file_hash = hash_uploaded_file(uploaded)
 
 # =========================
-# LOAD + APPLY REPRISE
+# LOAD + APPLY REPRISE (silencieux)
 # =========================
 if "file_hash" not in st.session_state or st.session_state.get("file_hash") != file_hash:
     st.session_state.file_hash = file_hash
@@ -472,7 +445,7 @@ if "file_hash" not in st.session_state or st.session_state.get("file_hash") != f
 
     df = load_excel(uploaded)
 
-    r = st.session_state.get("_resume_r", "") or st.query_params.get("r", "")
+    r = st.query_params.get("r", "")
     if r:
         payload = state_unpack(r)
         if payload and payload.get("h") == file_hash:
@@ -482,12 +455,12 @@ if "file_hash" not in st.session_state or st.session_state.get("file_hash") != f
 
 df = st.session_state.df
 
-# maj de l'URL à chaque rerun (reprise)
+# Mise à jour de l’URL à chaque action (reprise silencieuse)
 packed = state_pack({"h": file_hash, "s": snapshot_from_df(df)})
 st.query_params["r"] = packed
 
 # =========================
-# DASHBOARD
+# KPI + SEARCH + FILTERS
 # =========================
 total = len(df)
 present_count = int(df["present"].sum())
@@ -513,7 +486,10 @@ st.divider()
 # =========================
 display_cols = [c for c in STANDARD_ORDER if c in df.columns]
 if not display_cols:
-    display_cols = [c for c in df.columns if c not in ["present", "checkin_time", "checkin_by", "__id", "__base_id", "_search_blob"]][:4]
+    display_cols = [
+        c for c in df.columns
+        if c not in ["present", "checkin_time", "checkin_by", "__id", "__base_id", "_search_blob"]
+    ][:4]
 search_cols = list(dict.fromkeys(display_cols + [c for c in ["email", "company", "function"] if c in df.columns]))
 
 if "_search_blob" not in df.columns:
@@ -548,7 +524,26 @@ PAGE_SIZE = st.selectbox("Participants par page", PAGE_SIZE_OPTIONS, index=PAGE_
 
 total_rows = len(view)
 page_count = max(1, (total_rows + PAGE_SIZE - 1) // PAGE_SIZE)
-st.session_state.page = min(max(1, st.session_state.get("page", 1)), page_count)
+
+if "page" not in st.session_state:
+    st.session_state.page = 1
+st.session_state.page = min(max(1, st.session_state.page), page_count)
+
+def pager(page_count: int, page_value: int, label: str):
+    c_prev, c_info, c_next = st.columns([1, 2, 1], vertical_alignment="center")
+    with c_prev:
+        if st.button("Page précédente", disabled=(page_value <= 1), key=f"prev_{label}", use_container_width=True, type="secondary"):
+            st.session_state.page = max(1, page_value - 1)
+            st.rerun()
+    with c_info:
+        st.markdown(
+            f"<div style='text-align:center; font-weight:800; padding:0.35rem 0;'>Page {page_value} / {page_count}</div>",
+            unsafe_allow_html=True,
+        )
+    with c_next:
+        if st.button("Page suivante", disabled=(page_value >= page_count), key=f"next_{label}", use_container_width=True, type="secondary"):
+            st.session_state.page = min(page_count, page_value + 1)
+            st.rerun()
 
 pager(page_count, st.session_state.page, label="top")
 
@@ -586,7 +581,6 @@ for _, row in view_page.iterrows():
     cols[2].markdown(f"<div class='cell-nowrap'>{em}</div>", unsafe_allow_html=True)
     cols[3].markdown(f"<div class='cell-nowrap'>{co}</div>", unsafe_allow_html=True)
     cols[4].markdown(f"<div class='cell-nowrap'>{fu}</div>", unsafe_allow_html=True)
-
     cols[5].markdown(badge_html(is_present), unsafe_allow_html=True)
 
     if not is_present:
@@ -623,7 +617,6 @@ st.divider()
 # EXPORTS
 # =========================
 st.subheader("Exports")
-
 csv_all, csv_present, xlsx_all = build_exports(df)
 
 e1, e2, e3 = st.columns([1, 1, 1], vertical_alignment="center")
