@@ -31,7 +31,7 @@ MAIL_TO = "evenements@institutimagine.org"
 # --- WebDAV (Cloudbox / Nextcloud) : configuré ICI, pas dans l'UI ---
 WEBDAV_BASE_URL = "https://cloudbox.institutimagine.org/remote.php/dav/files/ambroise.leleve"
 WEBDAV_USER = "ambroise.leleve"         # <-- mets ton identifiant Nextcloud (ex: ambroise.leleve)
-WEBDAV_PASSWORD = "Boubouboubou122!"     # <-- mets un "mot de passe d'application" Nextcloud si possible
+WEBDAV_PASSWORD = "FSiAj-rDxEz-qwkaM-GkTLT-i7Qrm"     # <-- mets un "mot de passe d'application" Nextcloud si possible
 WEBDAV_AUTOSAVE_DIR = "Emargement_autosave"
 
 # --- Optionnel : section Admin pour modifier WebDAV dans l’UI ---
