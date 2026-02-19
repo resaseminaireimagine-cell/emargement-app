@@ -4,7 +4,6 @@ import re
 import hashlib
 import unicodedata
 import urllib.parse
-from base64 import b64encode
 from pathlib import Path
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -12,36 +11,34 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 import streamlit as st
 import altair as alt
-from urllib.request import Request, urlopen
-from urllib.error import HTTPError, URLError
 
 
 # =========================
-# CONFIG (simple pour les hôtes/hôtesses)
+# CONFIG
 # =========================
 APP_TITLE = "Outil d’émargement — Institut Imagine"
-PRIMARY = "#C4007A"   # rose Imagine
+PRIMARY = "#C4007A"
 BG = "#F6F7FB"
 TEXT = "#111827"
 MUTED = "#6B7280"
+
 PARIS_TZ = ZoneInfo("Europe/Paris")
 
 MAIL_TO = "evenements@institutimagine.org"
 
-# --- WebDAV (Cloudbox / Nextcloud) : configuré ICI, pas dans l'UI ---
-WEBDAV_BASE_URL = "https://cloudbox.institutimagine.org/remote.php/dav/files/ambroise.leleve"
-WEBDAV_USER = "ambroise.leleve"         # <-- mets ton identifiant Nextcloud (ex: ambroise.leleve)
-WEBDAV_PASSWORD = "FSiAj-rDxEz-qwkaM-GkTLT-i7Qrm"     # <-- mets un "mot de passe d'application" Nextcloud si possible
-WEBDAV_AUTOSAVE_DIR = "Emargement_autosave"
+# Autosave "self-contained" : sur le serveur (pas sur le PC)
+AUTOSAVE_DIR = Path("./autosave")
+AUTOSAVE_DIR.mkdir(parents=True, exist_ok=True)
 
-# --- Optionnel : section Admin pour modifier WebDAV dans l’UI ---
-# Laisse vide pour cacher complètement la section admin.
-ADMIN_PIN = ""  # ex: "1234"
-
-# Colonnes internes à ne JAMAIS exporter/auto-sauver
+# Colonnes internes à ne JAMAIS exporter/sauver
 INTERNAL_COLS = {"__id", "__base_id", "_search_blob", "_score"}
 
-LOGO_CANDIDATES = ["logo_rose.png", "LOGO ROSE.png", "LOGO_ROSE.png", "logo.png"]
+LOGO_CANDIDATES = [
+    "logo_rose.png",
+    "LOGO ROSE.png",
+    "LOGO_ROSE.png",
+    "logo.png",
+]
 
 ALIASES = {
     "first_name": ["first_name", "firstname", "first name", "given name", "given_name", "prenom", "prénom"],
@@ -58,7 +55,7 @@ PRESENT_TRUE = {"true", "1", "yes", "oui", "vrai", "x", "present", "présent"}
 
 
 # =========================
-# Helpers
+# HELPERS
 # =========================
 def now_paris_str() -> str:
     return datetime.now(PARIS_TZ).strftime("%Y-%m-%d %H:%M:%S")
@@ -76,8 +73,10 @@ def fold_text(s: str) -> str:
     s = "" if s is None else str(s)
     s = s.replace("\u00A0", " ").replace("\t", " ").replace("\n", " ")
     s = s.strip().lower()
+
     s = unicodedata.normalize("NFKD", s)
     s = "".join(ch for ch in s if not unicodedata.combining(ch))
+
     s = re.sub(r"[’'`´-]+", " ", s)
     s = re.sub(r"[^a-z0-9 ]+", " ", s)
     s = re.sub(r"\s+", " ", s).strip()
@@ -307,85 +306,33 @@ def mailto_link(to: str, subject: str, body: str) -> str:
 
 
 # =========================
-# WebDAV (Cloudbox/Nextcloud)
+# AUTOSAVE (SERVER LOCAL)
 # =========================
-def _basic_auth_header(user: str, password: str) -> str:
-    token = b64encode(f"{user}:{password}".encode("utf-8")).decode("ascii")
-    return f"Basic {token}"
-
-
-def webdav_url(base_url: str, remote_path: str) -> str:
-    base_url = base_url.rstrip("/")
-    remote_path = remote_path.strip("/")
-    parts = [urllib.parse.quote(p) for p in remote_path.split("/") if p]
-    return base_url + "/" + "/".join(parts)
-
-
-def webdav_request(method: str, url: str, user: str, password: str, data: bytes | None = None,
-                   headers: dict | None = None, timeout: int = 20) -> tuple[int, bytes]:
-    headers = headers or {}
-    headers["Authorization"] = _basic_auth_header(user, password)
-    req = Request(url, data=data, headers=headers, method=method)
-
-    try:
-        with urlopen(req, timeout=timeout) as resp:
-            return int(getattr(resp, "status", 200)), resp.read()
-    except HTTPError as e:
-        try:
-            payload = e.read()
-        except Exception:
-            payload = b""
-        return int(e.code), payload
-    except URLError:
-        return 0, b""
-
-
-def webdav_ensure_dir_recursive(base_url: str, user: str, password: str, dir_path: str) -> bool:
-    # Crée chaque niveau si besoin (Nextcloud n’aime pas MKCOL sur un parent inexistant)
-    clean = dir_path.strip("/")
-
-    if clean == "":
-        return True
-
-    acc = ""
-    for seg in clean.split("/"):
-        acc = f"{acc}/{seg}" if acc else seg
-        url = webdav_url(base_url, acc)
-        status, _ = webdav_request("MKCOL", url, user, password, data=None, headers={}, timeout=20)
-        if status not in (201, 405):  # 405 = existe déjà
-            return False
-    return True
-
-
-def autosave_remote_path(event_code: str, file_hash: str, mode: str, staff_name: str) -> str:
-    event_slug = slugify(event_code)
+def autosave_key(event_code: str, file_hash: str, mode: str, staff_name: str) -> str:
+    # stable, sans slash
+    ev = slugify(event_code)
     if mode == "per_agent":
-        agent_slug = slugify(staff_name) if staff_name else "unknown"
-        fname = f"autosave__{event_slug}__{file_hash}__agent_{agent_slug}.csv"
-    else:
-        fname = f"autosave__{event_slug}__{file_hash}.csv"
-    return f"{WEBDAV_AUTOSAVE_DIR.strip('/')}/{fname}"
+        ag = slugify(staff_name) if staff_name else "unknown"
+        return f"{ev}__{file_hash}__agent_{ag}"
+    return f"{ev}__{file_hash}__shared"
 
 
-def autosave_df_remote(df: pd.DataFrame, remote_path: str) -> bool:
+def autosave_path(key: str) -> Path:
+    return AUTOSAVE_DIR / f"autosave__{key}.csv"
+
+
+def autosave_df(df: pd.DataFrame, key: str) -> None:
+    p = autosave_path(key)
     export_df = drop_internal(df).copy()
-    payload = export_df.to_csv(index=False, sep=";", encoding="utf-8-sig").encode("utf-8-sig")
-    url = webdav_url(WEBDAV_BASE_URL, remote_path)
-    status, _ = webdav_request("PUT", url, WEBDAV_USER, WEBDAV_PASSWORD, data=payload,
-                               headers={"Content-Type": "text/csv; charset=utf-8"}, timeout=25)
-    return status in (200, 201, 204)
+    export_df.to_csv(p, index=False, sep=";", encoding="utf-8-sig")
 
 
-def try_load_autosave_remote(remote_path: str) -> pd.DataFrame | None:
-    url = webdav_url(WEBDAV_BASE_URL, remote_path)
-    status, data = webdav_request("GET", url, WEBDAV_USER, WEBDAV_PASSWORD, timeout=25)
-    if status in (0, 404):
-        return None
-    if status != 200:
+def try_load_autosave(key: str) -> pd.DataFrame | None:
+    p = autosave_path(key)
+    if not p.exists():
         return None
     try:
-        bio = io.BytesIO(data)
-        df = pd.read_csv(bio, sep=";", encoding="utf-8-sig")
+        df = pd.read_csv(p, sep=";", encoding="utf-8-sig")
         df = standardize_columns(df)
         df = ensure_internal_columns(df)
         df = sanitize_df(df)
@@ -395,14 +342,16 @@ def try_load_autosave_remote(remote_path: str) -> pd.DataFrame | None:
         return None
 
 
-def delete_autosave_remote(remote_path: str) -> bool:
-    url = webdav_url(WEBDAV_BASE_URL, remote_path)
-    status, _ = webdav_request("DELETE", url, WEBDAV_USER, WEBDAV_PASSWORD, timeout=20)
-    return status in (200, 202, 204, 404)
+def delete_autosave(key: str) -> bool:
+    p = autosave_path(key)
+    if p.exists():
+        p.unlink()
+        return True
+    return False
 
 
 # =========================
-# UI / CSS
+# PAGE CONFIG + CSS
 # =========================
 st.set_page_config(page_title=APP_TITLE, layout="wide")
 
@@ -419,6 +368,7 @@ h1, h2, h3, h4, h5, h6,
 button, input, textarea {{ font-family: var(--font) !important; }}
 
 header[data-testid="stHeader"] {{ display: none; }}
+
 .stApp {{ background: {BG}; }}
 .block-container {{ padding-top: 1.1rem; max-width: 1280px; }}
 h1, h2, h3, h4 {{ color: {TEXT}; }}
@@ -474,46 +424,9 @@ button[kind="secondary"], .stButton > button[kind="secondary"] {{
 """
 st.markdown(css, unsafe_allow_html=True)
 
-
 # =========================
-# Sidebar (simple)
+# HEADER
 # =========================
-with st.sidebar:
-    st.header("Démarrage")
-
-    staff_name = st.text_input("Nom de l’agent", placeholder="Ex: Léa").strip()
-    event_code = st.text_input("Code évènement", placeholder="Ex: HEROESVI_2026-02-24").strip()
-
-    autosave_mode_label = st.radio("Autosauvegarde", ["Partagée (équipe)", "Par agent"], index=0)
-    autosave_mode = "shared" if autosave_mode_label.startswith("Partagée") else "per_agent"
-
-    st.markdown("---")
-    st.caption("Astuce : si vous ne savez pas, laissez 'Partagée (équipe)'.")
-
-    # Admin (optionnel)
-    if ADMIN_PIN:
-        with st.expander("⚙️ Admin (Ambroise)"):
-            pin = st.text_input("Code admin", type="password")
-            if pin == ADMIN_PIN:
-                st.success("Mode admin activé.")
-                st.write("WebDAV configuré en haut du fichier app.py.")
-            else:
-                st.caption("Réservé à l’admin.")
-
-
-# =========================
-# Garde-fous (non-tech)
-# =========================
-if not WEBDAV_BASE_URL or not WEBDAV_USER or not WEBDAV_PASSWORD:
-    st.error("Configuration Cloudbox non prête. Contactez Ambroise.")
-    st.stop()
-
-# Crée/valide le dossier autosave (Cloudbox)
-if not webdav_ensure_dir_recursive(WEBDAV_BASE_URL, WEBDAV_USER, WEBDAV_PASSWORD, WEBDAV_AUTOSAVE_DIR):
-    st.error("Cloudbox indisponible (autosauvegarde impossible). Contactez Ambroise.")
-    st.stop()
-
-# Header
 logo_path = find_logo_path()
 c1, c2 = st.columns([1, 6], vertical_alignment="center")
 with c1:
@@ -524,12 +437,28 @@ with c2:
     st.caption("1) Saisir agent + code évènement • 2) Importer Excel • 3) Rechercher • 4) Émarger • 5) Exporter")
 st.divider()
 
-# Step required
+# =========================
+# SIDEBAR (simplifiée)
+# =========================
+with st.sidebar:
+    st.header("Démarrage")
+    staff_name = st.text_input("Nom de l’agent", placeholder="Ex: Doralis").strip()
+    event_code = st.text_input("Code évènement", placeholder="Ex: JUBILE_2026-03-12").strip()
+
+    autosave_mode_label = st.radio("Autosauvegarde", ["Partagée (équipe)", "Par agent"], index=0)
+    autosave_mode = "shared" if autosave_mode_label.startswith("Partagée") else "per_agent"
+
+    st.caption("Astuce : si vous ne savez pas, laissez “Partagée (équipe)”.")
+    st.markdown("---")
+    tablet_mode = st.toggle("Mode tablette (touch)", value=True)
+
 if not staff_name:
-    st.info("➡️ Saisissez le **Nom de l’agent** (sidebar) pour commencer.")
+    st.info("➡️ Saisissez le **Nom de l’agent** pour commencer.")
     st.stop()
 
-# Upload
+# =========================
+# UPLOAD + AUTO-RESTORE
+# =========================
 uploaded = st.file_uploader("Importer un fichier Excel (.xlsx)", type=["xlsx"])
 if uploaded is None:
     st.info("Importez un fichier Excel pour commencer.")
@@ -537,22 +466,17 @@ if uploaded is None:
 
 file_hash = hash_uploaded_file(uploaded)
 event_code_effective = event_code or Path(uploaded.name).stem or "event"
-remote_path = autosave_remote_path(event_code_effective, file_hash, autosave_mode, staff_name)
+key = autosave_key(event_code_effective, file_hash, autosave_mode, staff_name)
 
-# Bouton fin d’event (efface l’autosave)
-c_clear = st.container()
-with c_clear:
-    if st.button("🧹 Fin d’évènement : effacer l’autosauvegarde", use_container_width=True):
-        ok = delete_autosave_remote(remote_path)
-        if ok:
-            st.success("Autosauvegarde supprimée.")
-            st.session_state.pop("file_hash", None)
-            st.session_state.pop("df", None)
-        else:
-            st.warning("Suppression impossible. Contactez Ambroise.")
-        st.rerun()
+# Fin d’évènement : purge autosave
+if st.button("🧹 Fin d’évènement : effacer l’autosauvegarde", use_container_width=True):
+    delete_autosave(key)
+    st.session_state.pop("file_hash", None)
+    st.session_state.pop("df", None)
+    st.success("Autosauvegarde effacée.")
+    st.rerun()
 
-# Load / restore
+# init / reload if file changes
 if "file_hash" not in st.session_state or st.session_state.get("file_hash") != file_hash:
     st.session_state.file_hash = file_hash
     st.session_state.filename = uploaded.name
@@ -560,22 +484,23 @@ if "file_hash" not in st.session_state or st.session_state.get("file_hash") != f
     st.session_state["_prev_query"] = ""
     st.session_state["_prev_page_size"] = None
 
-    restored = try_load_autosave_remote(remote_path)
+    restored = try_load_autosave(key)
     if restored is not None:
         st.session_state.df = restored
         st.toast("Autosauvegarde restaurée ✅", icon="✅")
     else:
         st.session_state.df = load_excel(uploaded)
-        if not autosave_df_remote(st.session_state.df, remote_path):
-            st.warning("Autosauvegarde Cloudbox KO (réseau). Contactez Ambroise.")
+        autosave_df(st.session_state.df, key)
 
 df = st.session_state.df
 
-st.caption("💾 Autosauvegarde : enregistrée automatiquement sur Cloudbox à chaque émargement/annulation.")
+st.caption("💾 Autosauvegarde : enregistrée automatiquement pendant l’émargement.")
 st.caption(f"🗂️ Évènement : **{event_code_effective}** • Mode : **{autosave_mode_label}**")
 st.divider()
 
-# Dashboard
+# =========================
+# DASHBOARD
+# =========================
 total = len(df)
 present_count = int(df["present"].sum())
 remaining = total - present_count
@@ -595,7 +520,9 @@ donut = (
 st.altair_chart(donut, use_container_width=True)
 st.divider()
 
-# Search + filter
+# =========================
+# KPI + SEARCH + FILTERS
+# =========================
 k1, k2, k3, k4 = st.columns([1, 1, 1, 2], vertical_alignment="center")
 k1.metric("Participants", total)
 k2.metric("Présents", present_count)
@@ -609,22 +536,25 @@ if query != prev_q:
 st.session_state["_prev_query"] = query
 
 filter_choice = st.radio("Filtre", ["Non émargés", "Tous", "Présents uniquement"], index=0, horizontal=True)
+st.caption("Astuce : tape 'dupont jean' ou 'jean dupont' (accents/apostrophes ignorés).")
 st.divider()
 
-# Columns
+# =========================
+# VIEW FILTER + SORT
+# =========================
 display_cols = [c for c in STANDARD_ORDER if c in df.columns]
 if not display_cols:
     display_cols = [
         c for c in df.columns
         if c not in ["present", "checkin_time", "checkin_by", "__id", "__base_id", "_search_blob"]
     ][:4]
+
 search_cols = list(dict.fromkeys(display_cols + [c for c in ["email", "company", "function"] if c in df.columns]))
 
-# build blob once
 if "_search_blob" not in df.columns:
     df["_search_blob"] = build_search_blob(df, search_cols)
     st.session_state.df = df
-    autosave_df_remote(df, remote_path)
+    autosave_df(df, key)
 
 view = df.copy()
 
@@ -634,6 +564,7 @@ if query.strip():
     for t in toks:
         mask &= view["_search_blob"].str.contains(re.escape(t), na=False, regex=True)
     view = view[mask].copy()
+
     view["_score"] = view.apply(lambda r: relevance_score_row(r, query), axis=1)
     view = view.sort_values(by=["_score"], ascending=False, kind="stable")
 else:
@@ -645,14 +576,15 @@ if filter_choice == "Présents uniquement":
 elif filter_choice == "Non émargés":
     view = view[view["present"] == False].copy()
 
-# Auto-target single non-present
 auto_target_id = None
 if query.strip():
     candidates = view[view["present"] == False]
     if len(candidates) == 1:
         auto_target_id = candidates.iloc[0]["__id"]
 
-# Quick card
+# =========================
+# QUICK TARGET CARD
+# =========================
 if auto_target_id:
     target_row = df[df["__id"] == auto_target_id].iloc[0]
     st.markdown("### 🎯 Participant trouvé")
@@ -686,15 +618,17 @@ if auto_target_id:
                 df.at[i, "checkin_time"] = now_paris_str()
                 df.at[i, "checkin_by"] = staff_name
                 st.session_state.df = df
-                if not autosave_df_remote(df, remote_path):
-                    st.warning("Cloudbox KO. Contactez Ambroise.")
+                autosave_df(df, key)
             st.rerun()
 
     st.divider()
 
-# Pagination
+# =========================
+# PAGINATION
+# =========================
 PAGE_SIZE_OPTIONS = [25, 50, 75, 100]
-PAGE_SIZE = st.selectbox("Participants par page", PAGE_SIZE_OPTIONS, index=0, key="page_size")
+default_page_size = 25 if tablet_mode else 50
+PAGE_SIZE = st.selectbox("Participants par page", PAGE_SIZE_OPTIONS, index=PAGE_SIZE_OPTIONS.index(default_page_size), key="page_size")
 
 total_rows = len(view)
 page_count = max(1, (total_rows + PAGE_SIZE - 1) // PAGE_SIZE)
@@ -706,7 +640,9 @@ start = (st.session_state.page - 1) * PAGE_SIZE
 end = start + PAGE_SIZE
 view_page = view.iloc[start:end].copy()
 
-# List
+# =========================
+# LIST
+# =========================
 st.subheader("Liste des participants")
 
 header = st.columns([2.2, 2.8, 3, 3, 3, 2, 2], vertical_alignment="center")
@@ -734,6 +670,7 @@ for _, row in view_page.iterrows():
     cols[2].markdown(f"<div class='cell-nowrap'>{em}</div>", unsafe_allow_html=True)
     cols[3].markdown(f"<div class='cell-nowrap'>{co}</div>", unsafe_allow_html=True)
     cols[4].markdown(f"<div class='cell-nowrap'>{fu}</div>", unsafe_allow_html=True)
+
     cols[5].markdown(badge_html(is_present), unsafe_allow_html=True)
 
     if not is_present:
@@ -745,8 +682,7 @@ for _, row in view_page.iterrows():
                 df.at[i, "checkin_time"] = now_paris_str()
                 df.at[i, "checkin_by"] = staff_name
                 st.session_state.df = df
-                if not autosave_df_remote(df, remote_path):
-                    st.warning("Cloudbox KO. Contactez Ambroise.")
+                autosave_df(df, key)
             st.rerun()
     else:
         if cols[6].button("Annuler", key=f"an_{rid}", use_container_width=True, type="secondary"):
@@ -757,17 +693,18 @@ for _, row in view_page.iterrows():
                 df.at[i, "checkin_time"] = ""
                 df.at[i, "checkin_by"] = ""
                 st.session_state.df = df
-                if not autosave_df_remote(df, remote_path):
-                    st.warning("Cloudbox KO. Contactez Ambroise.")
+                autosave_df(df, key)
             st.rerun()
 
 pager(page_count, st.session_state.page, label="bottom")
-
 st.caption("Affichage : 0 / 0" if total_rows == 0 else f"Affichage : {start+1}-{min(end, total_rows)} / {total_rows}")
 st.divider()
 
-# Exports
+# =========================
+# EXPORTS
+# =========================
 st.subheader("Exports")
+
 csv_all, csv_present, xlsx_all = build_exports(df)
 
 e1, e2, e3 = st.columns([1, 1, 1], vertical_alignment="center")
@@ -776,12 +713,19 @@ with e1:
 with e2:
     st.download_button("⬇️ CSV (présents)", data=csv_present, file_name="emargement_presents.csv", mime="text/csv", use_container_width=True)
 with e3:
-    st.download_button("⬇️ Excel (.xlsx)", data=xlsx_all, file_name="emargement_export.xlsx",
-                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
+    st.download_button(
+        "⬇️ Excel (.xlsx)",
+        data=xlsx_all,
+        file_name="emargement_export.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+    )
 
 st.divider()
 
-# Email helper (mailto)
+# =========================
+# EMAIL
+# =========================
 st.subheader("Envoyer les exports par email")
 
 export_df = drop_internal(df).copy()
