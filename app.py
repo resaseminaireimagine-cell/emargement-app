@@ -20,7 +20,7 @@ import streamlit as st
 # =========================
 # CONFIG
 # =========================
-APP_TITLE = "Outil d’émargement — Institut Imagine"
+APP_TITLE = "OUTIL D'EMARGEMENT — INSTITUT IMAGINE"
 PRIMARY = "#C4007A"
 BG = "#F6F7FB"
 TEXT = "#111827"
