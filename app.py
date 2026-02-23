@@ -1,4 +1,5 @@
-# app.py — autonome, UI épurée, perf + reprise stable tablette
+# app.py — autonome, UI épurée, reprise via URL + perf + stable tablette
+# (sans colonne "Fonction" à l’écran)
 
 import io
 import re
@@ -14,7 +15,6 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 import streamlit as st
-import streamlit.components.v1 as components
 
 
 # =========================
@@ -29,8 +29,8 @@ PARIS_TZ = ZoneInfo("Europe/Paris")
 
 MAIL_TO = "evenements@institutimagine.org"
 
-# >>> À BUMPER À CHAQUE DÉPLOIEMENT <<<
-APP_BUILD = "2026-02-23-02"
+# Change-le quand tu redéploies (sert juste à "versionner" l’URL)
+APP_BUILD = "2026-02-23-03"
 
 LOGO_CANDIDATES = ["logo_rose.png", "LOGO ROSE.png", "LOGO_ROSE.png", "logo.png"]
 
@@ -45,10 +45,9 @@ ALIASES = {
     "checkin_by": ["checkin_by", "checkin by", "agent", "émargé par", "emarge par", "checked in by"],
 }
 
-# Affichage : on retire "function" de l’écran (tablette friendly)
+# Affichage : on retire la fonction pour alléger (tablette)
 DISPLAY_ORDER = ["first_name", "last_name", "email", "company"]
 PRESENT_TRUE = {"true", "1", "yes", "oui", "vrai", "x", "present", "présent"}
-
 INTERNAL_COLS = {"__id", "__base_id", "_search_blob", "_score"}
 
 
@@ -180,7 +179,6 @@ def build_search_blob(df: pd.DataFrame, cols: list[str]) -> pd.Series:
             parts.append(df[c].astype(str))
     if not parts:
         return pd.Series([""] * len(df), index=df.index)
-
     blob = parts[0]
     for p in parts[1:]:
         blob = blob + " " + p
@@ -265,12 +263,19 @@ def mailto_link(to: str, subject: str, body: str) -> str:
     return f"mailto:{to}?" + urllib.parse.urlencode(params, quote_via=urllib.parse.quote)
 
 
+def qp_get(key: str, default: str = "") -> str:
+    v = st.query_params.get(key, default)
+    if isinstance(v, list):
+        return v[0] if v else default
+    return str(v)
+
+
 # =========================
-# REPRISE VIA URL (r) — snapshot “présents uniquement”
+# REPRISE VIA URL (r) — présents uniquement
 # =========================
 def state_pack(state: dict) -> str:
     raw = json.dumps(state, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    comp = zlib.compress(raw, level=6)  # un peu plus rapide, suffisant
+    comp = zlib.compress(raw, level=6)
     return base64.urlsafe_b64encode(comp).decode("ascii").rstrip("=")
 
 
@@ -313,25 +318,6 @@ def apply_snapshot_present_only(df: pd.DataFrame, snap: dict) -> pd.DataFrame:
     return df.drop(columns=["checkin_time_snap", "checkin_by_snap"], errors="ignore")
 
 
-def _qp_get(key: str, default: str = "") -> str:
-    v = st.query_params.get(key, default)
-    if isinstance(v, list):
-        return v[0] if v else default
-    return str(v)
-
-
-def _sync_url_replace_state(r_token: str):
-    """Met à jour l’URL côté navigateur sans message Streamlit (stable tablette)."""
-    qp = dict(st.query_params)
-    qp["v"] = APP_BUILD
-    qp["r"] = r_token
-    query = urllib.parse.urlencode(qp, doseq=True, quote_via=urllib.parse.quote)
-    components.html(
-        f"<script>window.history.replaceState(null,'','?{query}');</script>",
-        height=0,
-    )
-
-
 # =========================
 # LOAD (cache)
 # =========================
@@ -351,15 +337,6 @@ def load_excel_bytes(file_bytes: bytes) -> pd.DataFrame:
 # =========================
 st.set_page_config(page_title=APP_TITLE, layout="wide")
 
-# Anti-cache front : si v ne matche pas, on force un vrai reload sur une URL “versionnée”
-if _qp_get("v", "") != APP_BUILD:
-    qp = dict(st.query_params)
-    qp["v"] = APP_BUILD
-    # on conserve r si déjà présent
-    query = urllib.parse.urlencode(qp, doseq=True, quote_via=urllib.parse.quote)
-    components.html(f"<script>window.location.replace('?{query}');</script>", height=0)
-    st.stop()
-
 st.markdown(
     """<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;600;700;800;900&display=swap">""",
     unsafe_allow_html=True,
@@ -371,7 +348,6 @@ css = f"""
 html, body, .stApp, [class*="css"] {{ font-family: var(--font) !important; }}
 
 header[data-testid="stHeader"] {{ display: none; }}
-
 .stApp {{ background: {BG}; }}
 .block-container {{ padding-top: 1.1rem; max-width: 1280px; }}
 h1, h2, h3, h4 {{ color: {TEXT}; }}
@@ -404,18 +380,14 @@ h1, h2, h3, h4 {{ color: {TEXT}; }}
   color: #ffffff !important;
   border: none !important;
 }}
-.stButton > button:not([kind="secondary"]) * {{
-  color: #ffffff !important;
-}}
+.stButton > button:not([kind="secondary"]) * {{ color: #ffffff !important; }}
 
 .stButton > button[kind="secondary"] {{
   background: #ffffff !important;
   color: {PRIMARY} !important;
   border: 2px solid {PRIMARY} !important;
 }}
-.stButton > button[kind="secondary"] * {{
-  color: {PRIMARY} !important;
-}}
+.stButton > button[kind="secondary"] * {{ color: {PRIMARY} !important; }}
 
 .badge-present {{
   background:#DCFCE7; color:#166534; padding:7px 12px; border-radius:10px; font-weight:900;
@@ -435,17 +407,24 @@ h1, h2, h3, h4 {{ color: {TEXT}; }}
 """
 st.markdown(css, unsafe_allow_html=True)
 
+# Compteur de runs (clé pour éviter d’écrire les query params au tout premier rendu)
+if "_run_count" not in st.session_state:
+    st.session_state._run_count = 0
+st.session_state._run_count += 1
+
+
 # =========================
 # HEADER
 # =========================
 logo_path = find_logo_path()
-c1, c2 = st.columns([1, 6], vertical_alignment="center")
+c1, c2 = st.columns([1, 6])
 with c1:
     if logo_path:
         st.image(logo_path, width=90)
 with c2:
     st.markdown(f"## {APP_TITLE}")
 st.divider()
+
 
 # =========================
 # SIDEBAR
@@ -468,6 +447,7 @@ if uploaded is None:
 file_bytes = uploaded.getvalue()
 file_hash = hashlib.sha256(file_bytes).hexdigest()[:16]
 
+
 # =========================
 # LOAD + REPRISE
 # =========================
@@ -482,7 +462,7 @@ if new_file:
 
     df = load_excel_bytes(file_bytes).copy()
 
-    r = _qp_get("r", "")
+    r = qp_get("r", "")
     if r:
         payload = state_unpack(r)
         if payload and payload.get("h") == file_hash:
@@ -494,7 +474,7 @@ if new_file:
     else:
         st.session_state.snap = snapshot_present_only(df)
 
-    # Search blob une fois (inclut function si dispo)
+    # Search blob (inclut function si elle existe, même si on ne l’affiche pas)
     display_cols = [c for c in DISPLAY_ORDER if c in df.columns]
     if not display_cols:
         display_cols = [
@@ -507,12 +487,11 @@ if new_file:
     st.session_state.df = df
     st.session_state.id2i = dict(zip(df["__id"], df.index))
 
-    # Écrit l’URL (silencieusement) dès le chargement pour activer la reprise
-    packed = state_pack({"h": file_hash, "s": st.session_state.snap})
-    st.session_state._last_r = packed
-    _sync_url_replace_state(packed)
+    st.session_state.dirty_qp = True
+    st.session_state._last_packed = None
 
 df = st.session_state.df
+
 
 # =========================
 # KPI + SEARCH + FILTERS
@@ -521,7 +500,7 @@ total = len(df)
 present_count = int(df["present"].sum())
 remaining = total - present_count
 
-k1, k2, k3, k4 = st.columns([1, 1, 1, 2], vertical_alignment="center")
+k1, k2, k3, k4 = st.columns([1, 1, 1, 2])
 k1.metric("Participants", total)
 k2.metric("Présents", present_count)
 k3.metric("Restants", remaining)
@@ -536,6 +515,7 @@ st.session_state["_prev_query"] = query
 filter_choice = st.radio("Filtre", ["Non émargés", "Tous", "Présents uniquement"], index=0, horizontal=True)
 st.divider()
 
+
 # =========================
 # VIEW
 # =========================
@@ -547,7 +527,6 @@ if query.strip():
     for t in toks:
         mask &= view["_search_blob"].str.contains(re.escape(t), na=False, regex=True)
     view = view[mask].copy()
-
     view["_score"] = view.apply(lambda r: relevance_score_row(r, query), axis=1)
     view = view.sort_values(by=["_score"], ascending=False, kind="stable")
 else:
@@ -558,6 +537,7 @@ if filter_choice == "Présents uniquement":
     view = view[view["present"] == True].copy()
 elif filter_choice == "Non émargés":
     view = view[view["present"] == False].copy()
+
 
 # =========================
 # PAGINATION
@@ -579,7 +559,7 @@ if "page" not in st.session_state:
 st.session_state.page = min(max(1, st.session_state.page), page_count)
 
 def pager(page_count: int, page_value: int, label: str):
-    c_prev, c_info, c_next = st.columns([1, 2, 1], vertical_alignment="center")
+    c_prev, c_info, c_next = st.columns([1, 2, 1])
     with c_prev:
         if st.button("Page précédente", disabled=(page_value <= 1), key=f"prev_{label}", use_container_width=True, type="secondary"):
             st.session_state.page = max(1, page_value - 1)
@@ -600,20 +580,19 @@ start = (st.session_state.page - 1) * PAGE_SIZE
 end = start + PAGE_SIZE
 view_page = view.iloc[start:end].copy()
 
+
 # =========================
-# LIST (sans "Fonction")
+# LIST (sans colonne Fonction)
 # =========================
 st.subheader("Liste des participants")
 
-header = st.columns([2.4, 2.8, 3.2, 3.2, 2.0, 2.0], vertical_alignment="center")
+header = st.columns([2.4, 2.8, 3.2, 3.2, 2.0, 2.0])
 header[0].markdown("**Prénom**")
 header[1].markdown("**Nom**")
 header[2].markdown("**Email**")
 header[3].markdown("**Société**")
 header[4].markdown("**Statut**")
 header[5].markdown("**Action**")
-
-dirty = False
 
 for _, row in view_page.iterrows():
     rid = row["__id"]
@@ -624,7 +603,7 @@ for _, row in view_page.iterrows():
     em = row.get("email", "")
     co = row.get("company", "")
 
-    cols = st.columns([2.4, 2.8, 3.2, 3.2, 2.0, 2.0], vertical_alignment="center")
+    cols = st.columns([2.4, 2.8, 3.2, 3.2, 2.0, 2.0])
     cols[0].markdown(f"<div class='cell-nowrap'>{fn}</div>", unsafe_allow_html=True)
     cols[1].markdown(f"<div class='cell-nowrap'>{ln}</div>", unsafe_allow_html=True)
     cols[2].markdown(f"<div class='cell-nowrap'>{em}</div>", unsafe_allow_html=True)
@@ -646,8 +625,8 @@ for _, row in view_page.iterrows():
                 snap[bid] = {"t": df.at[i, "checkin_time"], "b": df.at[i, "checkin_by"]}
                 st.session_state.snap = snap
 
+                st.session_state.dirty_qp = True
                 st.session_state.pop("xlsx_bytes", None)
-                dirty = True
 
             st.rerun()
     else:
@@ -663,8 +642,8 @@ for _, row in view_page.iterrows():
                 snap.pop(bid, None)
                 st.session_state.snap = snap
 
+                st.session_state.dirty_qp = True
                 st.session_state.pop("xlsx_bytes", None)
-                dirty = True
 
             st.rerun()
 
@@ -677,14 +656,22 @@ else:
 
 st.divider()
 
+
 # =========================
-# SYNC URL (reprise) — silencieux, uniquement si changement
+# SYNC URL (reprise) — seulement après le 1er rendu
 # =========================
-if dirty:
+# On évite d’écrire les query params au tout premier run (tablette -> bug "SessionInfo").
+if st.session_state.get("dirty_qp", False) and st.session_state._run_count >= 2:
     packed = state_pack({"h": file_hash, "s": st.session_state.get("snap", {})})
-    if st.session_state.get("_last_r") != packed:
-        st.session_state._last_r = packed
-        _sync_url_replace_state(packed)
+    if st.session_state.get("_last_packed") != packed:
+        st.session_state._last_packed = packed
+        try:
+            st.experimental_set_query_params(r=packed, v=APP_BUILD)
+        except Exception:
+            st.query_params["r"] = packed
+            st.query_params["v"] = APP_BUILD
+    st.session_state.dirty_qp = False
+
 
 # =========================
 # EXPORTS (XLSX à la demande)
@@ -696,7 +683,7 @@ csv_all = export_df.to_csv(index=False, sep=";", encoding="utf-8-sig").encode("u
 present_only = export_df[export_df["present"] == True].copy()
 csv_present = present_only.to_csv(index=False, sep=";", encoding="utf-8-sig").encode("utf-8-sig")
 
-e1, e2, e3 = st.columns([1, 1, 1], vertical_alignment="center")
+e1, e2, e3 = st.columns([1, 1, 1])
 with e1:
     st.download_button("⬇️ CSV (Excel FR)", data=csv_all, file_name="emargement_export.csv", mime="text/csv", use_container_width=True)
 with e2:
@@ -714,6 +701,7 @@ with e3:
         )
 
 st.divider()
+
 
 # =========================
 # EMAIL
