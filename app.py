@@ -659,19 +659,16 @@ st.divider()
 
 # =========================
 # SYNC URL (reprise) — seulement après le 1er rendu
-# =========================
-# On évite d’écrire les query params au tout premier run (tablette -> bug "SessionInfo").
 if st.session_state.get("dirty_qp", False) and st.session_state._run_count >= 2:
     packed = state_pack({"h": file_hash, "s": st.session_state.get("snap", {})})
     if st.session_state.get("_last_packed") != packed:
         st.session_state._last_packed = packed
-        try:
-            st.experimental_set_query_params(r=packed, v=APP_BUILD)
-        except Exception:
-            st.query_params["r"] = packed
-            st.query_params["v"] = APP_BUILD
-    st.session_state.dirty_qp = False
 
+        # Conserve les autres paramètres éventuels, et met à jour r + v
+        st.query_params["r"] = packed
+        st.query_params["v"] = APP_BUILD
+
+    st.session_state.dirty_qp = False
 
 # =========================
 # EXPORTS (XLSX à la demande)
