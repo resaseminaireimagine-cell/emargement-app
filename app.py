@@ -1,4 +1,4 @@
-# app.py — version finale autonome (sans Cloudbox), UI épurée
+# app.py — version finale autonome (sans Cloudbox), UI épurée + optimisations perf
 
 import io
 import re
@@ -14,7 +14,6 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 import streamlit as st
-import altair as alt
 
 
 # =========================
@@ -41,7 +40,9 @@ ALIASES = {
     "checkin_time": ["checkin_time", "checkin time", "heure", "date", "datetime", "check-in time"],
     "checkin_by": ["checkin_by", "checkin by", "agent", "émargé par", "emarge par", "checked in by"],
 }
-STANDARD_ORDER = ["first_name", "last_name", "email", "company", "function"]
+
+# Affichage (on retire "function" à l’écran pour alléger, mais on la garde si elle existe pour les exports & la recherche)
+DISPLAY_ORDER = ["first_name", "last_name", "email", "company"]  # <-- pas de "function" ici
 PRESENT_TRUE = {"true", "1", "yes", "oui", "vrai", "x", "present", "présent"}
 
 INTERNAL_COLS = {"__id", "__base_id", "_search_blob", "_score"}
@@ -126,6 +127,7 @@ def coerce_present(v) -> bool:
 
 def ensure_internal_columns(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
+
     if "present" not in df.columns:
         df["present"] = False
     else:
@@ -168,20 +170,6 @@ def drop_internal(df: pd.DataFrame) -> pd.DataFrame:
     return df.drop(columns=list(INTERNAL_COLS), errors="ignore")
 
 
-def hash_uploaded_file(uploaded_file) -> str:
-    data = uploaded_file.getvalue()
-    return hashlib.sha256(data).hexdigest()[:16]
-
-
-def load_excel(uploaded_file) -> pd.DataFrame:
-    df = pd.read_excel(uploaded_file, engine="openpyxl")
-    df = standardize_columns(df)
-    df = ensure_internal_columns(df)
-    df = sanitize_df(df)
-    df = add_ids(df)
-    return df
-
-
 def build_search_blob(df: pd.DataFrame, cols: list[str]) -> pd.Series:
     parts = []
     for c in cols:
@@ -189,6 +177,7 @@ def build_search_blob(df: pd.DataFrame, cols: list[str]) -> pd.Series:
             parts.append(df[c].astype(str))
     if not parts:
         return pd.Series([""] * len(df), index=df.index)
+
     blob = parts[0]
     for p in parts[1:]:
         blob = blob + " " + p
@@ -274,7 +263,7 @@ def mailto_link(to: str, subject: str, body: str) -> str:
 
 
 # =========================
-# REPRISE SILENCIEUSE VIA URL (paramètre r)
+# REPRISE SILENCIEUSE VIA URL (paramètre r) — version “présents uniquement”
 # =========================
 def state_pack(state: dict) -> str:
     raw = json.dumps(state, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
@@ -292,30 +281,47 @@ def state_unpack(token: str) -> dict | None:
         return None
 
 
-def snapshot_from_df(df: pd.DataFrame) -> dict:
-    snap = {}
-    for _, r in df.iterrows():
-        bid = r.get("__base_id", "")
-        if not bid:
-            continue
-        snap[bid] = {
-            "p": bool(r.get("present", False)),
-            "t": str(r.get("checkin_time", "")),
-            "b": str(r.get("checkin_by", "")),
-        }
-    return snap
+def snapshot_present_only(df: pd.DataFrame) -> dict:
+    present_df = df[df["present"] == True][["__base_id", "checkin_time", "checkin_by"]].copy()
+    return {
+        bid: {"t": t, "b": b}
+        for bid, t, b in zip(present_df["__base_id"], present_df["checkin_time"], present_df["checkin_by"])
+    }
 
 
-def apply_snapshot(df: pd.DataFrame, snap: dict) -> pd.DataFrame:
+def apply_snapshot_present_only(df: pd.DataFrame, snap: dict) -> pd.DataFrame:
     df = df.copy()
-    if "__base_id" not in df.columns:
+    # reset
+    df["present"] = False
+    df["checkin_time"] = ""
+    df["checkin_by"] = ""
+
+    if not snap:
         return df
-    for i, r in df.iterrows():
-        bid = r.get("__base_id", "")
-        if bid in snap:
-            df.at[i, "present"] = bool(snap[bid].get("p", False))
-            df.at[i, "checkin_time"] = str(snap[bid].get("t", ""))
-            df.at[i, "checkin_by"] = str(snap[bid].get("b", ""))
+
+    snap_df = pd.DataFrame.from_dict(snap, orient="index")
+    snap_df.index.name = "__base_id"
+    snap_df = snap_df.rename(columns={"t": "checkin_time", "b": "checkin_by"}).reset_index()
+
+    df = df.merge(snap_df, on="__base_id", how="left", suffixes=("", "_snap"))
+    mask = df["checkin_time_snap"].notna()
+    df.loc[mask, "present"] = True
+    df.loc[mask, "checkin_time"] = df.loc[mask, "checkin_time_snap"].astype(str)
+    df.loc[mask, "checkin_by"] = df.loc[mask, "checkin_by_snap"].astype(str)
+    return df.drop(columns=["checkin_time_snap", "checkin_by_snap"], errors="ignore")
+
+
+# =========================
+# LOAD (cache)
+# =========================
+@st.cache_data(show_spinner=False)
+def load_excel_bytes(file_bytes: bytes) -> pd.DataFrame:
+    bio = io.BytesIO(file_bytes)
+    df = pd.read_excel(bio, engine="openpyxl")
+    df = standardize_columns(df)
+    df = ensure_internal_columns(df)
+    df = sanitize_df(df)
+    df = add_ids(df)
     return df
 
 
@@ -355,7 +361,6 @@ h1, h2, h3, h4 {{ color: {TEXT}; }}
   font-size: 1.0rem;
 }}
 
-/* Boutons */
 .stButton > button {{
   border-radius: 14px !important;
   padding: 0.85rem 1.05rem !important;
@@ -364,7 +369,6 @@ h1, h2, h3, h4 {{ color: {TEXT}; }}
   white-space: nowrap !important;
 }}
 
-/* Primary */
 .stButton > button:not([kind="secondary"]) {{
   background-color: {PRIMARY} !important;
   color: #ffffff !important;
@@ -374,7 +378,6 @@ h1, h2, h3, h4 {{ color: {TEXT}; }}
   color: #ffffff !important;
 }}
 
-/* Secondary */
 .stButton > button[kind="secondary"] {{
   background: #ffffff !important;
   color: {PRIMARY} !important;
@@ -432,32 +435,52 @@ if uploaded is None:
     st.info("Importez un fichier Excel pour commencer.")
     st.stop()
 
-file_hash = hash_uploaded_file(uploaded)
+# Lecture des bytes UNE fois (évite des re-lectures)
+file_bytes = uploaded.getvalue()
+file_hash = hashlib.sha256(file_bytes).hexdigest()[:16]
 
 # =========================
 # LOAD + APPLY REPRISE (silencieux)
 # =========================
-if "file_hash" not in st.session_state or st.session_state.get("file_hash") != file_hash:
+new_file = ("file_hash" not in st.session_state) or (st.session_state.get("file_hash") != file_hash)
+
+if new_file:
     st.session_state.file_hash = file_hash
     st.session_state.filename = uploaded.name
     st.session_state.page = 1
     st.session_state["_prev_query"] = ""
+    st.session_state.pop("xlsx_bytes", None)
 
-    df = load_excel(uploaded)
+    df = load_excel_bytes(file_bytes).copy()
 
+    # Reprise silencieuse via URL
     r = st.query_params.get("r", "")
     if r:
         payload = state_unpack(r)
         if payload and payload.get("h") == file_hash:
-            df = apply_snapshot(df, payload.get("s", {}))
+            snap = payload.get("s", {})
+            df = apply_snapshot_present_only(df, snap)
+            st.session_state.snap = snap
+        else:
+            st.session_state.snap = snapshot_present_only(df)
+    else:
+        st.session_state.snap = snapshot_present_only(df)
+
+    # Search blob (une fois)
+    display_cols = [c for c in DISPLAY_ORDER if c in df.columns]
+    if not display_cols:
+        display_cols = [
+            c for c in df.columns
+            if c not in ["present", "checkin_time", "checkin_by", "__id", "__base_id", "_search_blob"]
+        ][:4]
+    search_cols = list(dict.fromkeys(display_cols + [c for c in ["email", "company", "function"] if c in df.columns]))
+    df["_search_blob"] = build_search_blob(df, search_cols)
 
     st.session_state.df = df
+    st.session_state.id2i = dict(zip(df["__id"], df.index))
+    st.session_state.dirty = True  # force maj URL après init
 
 df = st.session_state.df
-
-# Mise à jour de l’URL à chaque action (reprise silencieuse)
-packed = state_pack({"h": file_hash, "s": snapshot_from_df(df)})
-st.query_params["r"] = packed
 
 # =========================
 # KPI + SEARCH + FILTERS
@@ -484,18 +507,6 @@ st.divider()
 # =========================
 # VIEW FILTER + SORT
 # =========================
-display_cols = [c for c in STANDARD_ORDER if c in df.columns]
-if not display_cols:
-    display_cols = [
-        c for c in df.columns
-        if c not in ["present", "checkin_time", "checkin_by", "__id", "__base_id", "_search_blob"]
-    ][:4]
-search_cols = list(dict.fromkeys(display_cols + [c for c in ["email", "company", "function"] if c in df.columns]))
-
-if "_search_blob" not in df.columns:
-    df["_search_blob"] = build_search_blob(df, search_cols)
-    st.session_state.df = df
-
 view = df.copy()
 
 if query.strip():
@@ -504,6 +515,8 @@ if query.strip():
     for t in toks:
         mask &= view["_search_blob"].str.contains(re.escape(t), na=False, regex=True)
     view = view[mask].copy()
+
+    # <200 : scoring OK
     view["_score"] = view.apply(lambda r: relevance_score_row(r, query), axis=1)
     view = view.sort_values(by=["_score"], ascending=False, kind="stable")
 else:
@@ -520,7 +533,12 @@ elif filter_choice == "Non émargés":
 # =========================
 PAGE_SIZE_OPTIONS = [25, 50, 75, 100]
 default_page_size = 25 if tablet_mode else 50
-PAGE_SIZE = st.selectbox("Participants par page", PAGE_SIZE_OPTIONS, index=PAGE_SIZE_OPTIONS.index(default_page_size), key="page_size")
+PAGE_SIZE = st.selectbox(
+    "Participants par page",
+    PAGE_SIZE_OPTIONS,
+    index=PAGE_SIZE_OPTIONS.index(default_page_size),
+    key="page_size"
+)
 
 total_rows = len(view)
 page_count = max(1, (total_rows + PAGE_SIZE - 1) // PAGE_SIZE)
@@ -528,6 +546,7 @@ page_count = max(1, (total_rows + PAGE_SIZE - 1) // PAGE_SIZE)
 if "page" not in st.session_state:
     st.session_state.page = 1
 st.session_state.page = min(max(1, st.session_state.page), page_count)
+
 
 def pager(page_count: int, page_value: int, label: str):
     c_prev, c_info, c_next = st.columns([1, 2, 1], vertical_alignment="center")
@@ -545,6 +564,7 @@ def pager(page_count: int, page_value: int, label: str):
             st.session_state.page = min(page_count, page_value + 1)
             st.rerun()
 
+
 pager(page_count, st.session_state.page, label="top")
 
 start = (st.session_state.page - 1) * PAGE_SIZE
@@ -552,18 +572,18 @@ end = start + PAGE_SIZE
 view_page = view.iloc[start:end].copy()
 
 # =========================
-# LIST
+# LIST (sans colonne "Fonction")
 # =========================
 st.subheader("Liste des participants")
 
-header = st.columns([2.2, 2.8, 3, 3, 3, 2, 2], vertical_alignment="center")
+# Colonnes : Prénom / Nom / Email / Société / Statut / Action
+header = st.columns([2.4, 2.8, 3.2, 3.2, 2.0, 2.0], vertical_alignment="center")
 header[0].markdown("**Prénom**")
 header[1].markdown("**Nom**")
 header[2].markdown("**Email**")
 header[3].markdown("**Société**")
-header[4].markdown("**Fonction**")
-header[5].markdown("**Statut**")
-header[6].markdown("**Action**")
+header[4].markdown("**Statut**")
+header[5].markdown("**Action**")
 
 for _, row in view_page.iterrows():
     rid = row["__id"]
@@ -573,35 +593,49 @@ for _, row in view_page.iterrows():
     ln = row.get("last_name", "")
     em = row.get("email", "")
     co = row.get("company", "")
-    fu = row.get("function", "")
 
-    cols = st.columns([2.2, 2.8, 3, 3, 3, 2, 2], vertical_alignment="center")
+    cols = st.columns([2.4, 2.8, 3.2, 3.2, 2.0, 2.0], vertical_alignment="center")
     cols[0].markdown(f"<div class='cell-nowrap'>{fn}</div>", unsafe_allow_html=True)
     cols[1].markdown(f"<div class='cell-nowrap'>{ln}</div>", unsafe_allow_html=True)
     cols[2].markdown(f"<div class='cell-nowrap'>{em}</div>", unsafe_allow_html=True)
     cols[3].markdown(f"<div class='cell-nowrap'>{co}</div>", unsafe_allow_html=True)
-    cols[4].markdown(f"<div class='cell-nowrap'>{fu}</div>", unsafe_allow_html=True)
-    cols[5].markdown(badge_html(is_present), unsafe_allow_html=True)
+    cols[4].markdown(badge_html(is_present), unsafe_allow_html=True)
+
+    i = st.session_state.id2i.get(rid)
 
     if not is_present:
-        if cols[6].button("Émarger", key=f"em_{rid}", use_container_width=True, type="primary"):
-            idx = df.index[df["__id"] == rid]
-            if len(idx):
-                i = idx[0]
+        if cols[5].button("Émarger", key=f"em_{rid}", use_container_width=True, type="primary"):
+            if i is not None:
                 df.at[i, "present"] = True
                 df.at[i, "checkin_time"] = now_paris_str()
                 df.at[i, "checkin_by"] = staff_name
                 st.session_state.df = df
+
+                # snapshot incrémental
+                bid = df.at[i, "__base_id"]
+                snap = st.session_state.get("snap", {})
+                snap[bid] = {"t": df.at[i, "checkin_time"], "b": df.at[i, "checkin_by"]}
+                st.session_state.snap = snap
+                st.session_state.dirty = True
+                st.session_state.pop("xlsx_bytes", None)
+
             st.rerun()
     else:
-        if cols[6].button("Annuler", key=f"an_{rid}", use_container_width=True, type="secondary"):
-            idx = df.index[df["__id"] == rid]
-            if len(idx):
-                i = idx[0]
+        if cols[5].button("Annuler", key=f"an_{rid}", use_container_width=True, type="secondary"):
+            if i is not None:
                 df.at[i, "present"] = False
                 df.at[i, "checkin_time"] = ""
                 df.at[i, "checkin_by"] = ""
                 st.session_state.df = df
+
+                # snapshot incrémental
+                bid = df.at[i, "__base_id"]
+                snap = st.session_state.get("snap", {})
+                snap.pop(bid, None)
+                st.session_state.snap = snap
+                st.session_state.dirty = True
+                st.session_state.pop("xlsx_bytes", None)
+
             st.rerun()
 
 pager(page_count, st.session_state.page, label="bottom")
@@ -614,10 +648,22 @@ else:
 st.divider()
 
 # =========================
-# EXPORTS
+# MAJ URL (reprise silencieuse) — seulement si données modifiées
+# =========================
+if st.session_state.get("dirty", False):
+    packed = state_pack({"h": file_hash, "s": st.session_state.get("snap", {})})
+    st.query_params["r"] = packed
+    st.session_state.dirty = False
+
+# =========================
+# EXPORTS (XLSX à la demande)
 # =========================
 st.subheader("Exports")
-csv_all, csv_present, xlsx_all = build_exports(df)
+
+export_df = drop_internal(df).copy()
+csv_all = export_df.to_csv(index=False, sep=";", encoding="utf-8-sig").encode("utf-8-sig")
+present_only = export_df[export_df["present"] == True].copy()
+csv_present = present_only.to_csv(index=False, sep=";", encoding="utf-8-sig").encode("utf-8-sig")
 
 e1, e2, e3 = st.columns([1, 1, 1], vertical_alignment="center")
 with e1:
@@ -625,13 +671,16 @@ with e1:
 with e2:
     st.download_button("⬇️ CSV (présents)", data=csv_present, file_name="emargement_presents.csv", mime="text/csv", use_container_width=True)
 with e3:
-    st.download_button(
-        "⬇️ Excel (.xlsx)",
-        data=xlsx_all,
-        file_name="emargement_export.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True,
-    )
+    if st.button("Préparer Excel (.xlsx)", use_container_width=True):
+        st.session_state.xlsx_bytes = build_exports(df)[2]
+    if "xlsx_bytes" in st.session_state:
+        st.download_button(
+            "⬇️ Excel (.xlsx)",
+            data=st.session_state.xlsx_bytes,
+            file_name="emargement_export.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
 
 st.divider()
 
@@ -640,7 +689,6 @@ st.divider()
 # =========================
 st.subheader("Envoyer les exports par email")
 
-export_df = drop_internal(df).copy()
 present_only = export_df[export_df["present"] == True].copy()
 not_present_only = export_df[export_df["present"] == False].copy()
 
