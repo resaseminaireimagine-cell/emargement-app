@@ -553,8 +553,7 @@ if uploaded is None:
     st.markdown(
         """
         <div class="top-note">
-          Charge un fichier participants pour demarrer. Tu peux utiliser le modele CSV dans la barre laterale,
-          puis partager l'app via GitHub + Streamlit Community Cloud.
+          Charge un fichier participants pour demarrer.
         </div>
         """,
         unsafe_allow_html=True,
