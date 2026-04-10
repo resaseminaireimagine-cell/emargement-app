@@ -18,6 +18,7 @@ import streamlit as st
 
 APP_TITLE = "EMARGEMENT"
 APP_SUBTITLE = "Application de suivi des presences pour evenements et seminaires."
+APP_TAGLINE = "Guerir les maladies genetiques"
 APP_BUILD = "2026-04-10-02"
 PRIMARY = "#D0007F"
 PRIMARY_DARK = "#8B0D59"
