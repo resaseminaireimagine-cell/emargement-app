@@ -7,6 +7,7 @@ import unicodedata
 import urllib.parse
 import zlib
 from datetime import datetime
+from html import escape
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -15,13 +16,20 @@ import pandas as pd
 import streamlit as st
 
 
-APP_TITLE = "EMARGEMENT - INSTITUT IMAGINE"
+APP_TITLE = "EMARGEMENT"
 APP_SUBTITLE = "Application de suivi des presences pour evenements et seminaires."
-APP_BUILD = "2026-04-10-01"
-PRIMARY = "#C4007A"
-BG = "#F6F7FB"
-TEXT = "#111827"
-MUTED = "#6B7280"
+APP_TAGLINE = "Guerir les maladies genetiques"
+APP_BUILD = "2026-04-10-02"
+PRIMARY = "#D0007F"
+PRIMARY_DARK = "#8B0D59"
+PRIMARY_DEEP = "#650B41"
+PRIMARY_SOFT = "#F7D7E8"
+PRIMARY_SOFTEST = "#FDF4F9"
+BG = "#FBF7FA"
+SURFACE = "#FFFFFF"
+BORDER = "#E8D7E2"
+TEXT = "#2B1630"
+MUTED = "#71566B"
 PARIS_TZ = ZoneInfo("Europe/Paris")
 MAIL_TO = "evenements@institutimagine.org"
 LOGO_CANDIDATES = ["logo_rose.png", "LOGO ROSE.png", "LOGO_ROSE.png", "logo.png"]
@@ -409,22 +417,41 @@ def badge_html(is_present: bool) -> str:
     return "<span class='badge-todo'>A emarger</span>"
 
 
-st.set_page_config(page_title=APP_TITLE, layout="wide")
+def build_brand_chips(staff_name: str, event_code: str, uploaded_name: str, total: int) -> str:
+    chips: list[str] = []
+    if event_code:
+        chips.append(f"<span class='brand-chip'>Evenement : {escape(event_code)}</span>")
+    if staff_name:
+        chips.append(f"<span class='brand-chip'>Agent : {escape(staff_name)}</span>")
+    if uploaded_name:
+        chips.append(f"<span class='brand-chip'>Fichier : {escape(uploaded_name)}</span>")
+    chips.append(f"<span class='brand-chip'>Participants : {total}</span>")
+    return "".join(chips)
 
-st.markdown(
-    """<link rel=\"stylesheet\" href=\"https://fonts.googleapis.com/css2?family=Montserrat:wght@400;600;700;800;900&display=swap\">""",
-    unsafe_allow_html=True,
-)
+
+st.set_page_config(page_title=f"{APP_TITLE} - Institut Imagine", layout="wide")
 
 st.markdown(
     f"""
     <style>
     :root {{
-      --font: 'Montserrat', sans-serif;
+      --font-heading: "Helvetica Neue", Helvetica, Arial, sans-serif;
+      --font-body: "Myriad Pro", "Helvetica Neue", Helvetica, Arial, sans-serif;
+      --primary: {PRIMARY};
+      --primary-dark: {PRIMARY_DARK};
+      --primary-deep: {PRIMARY_DEEP};
+      --primary-soft: {PRIMARY_SOFT};
+      --primary-softest: {PRIMARY_SOFTEST};
+      --surface: {SURFACE};
+      --border: {BORDER};
+      --text: {TEXT};
+      --muted: {MUTED};
+      --bg: {BG};
     }}
 
     html, body, .stApp, [class*="css"] {{
-      font-family: var(--font) !important;
+      font-family: var(--font-body) !important;
+      color: var(--text);
     }}
 
     header[data-testid="stHeader"] {{
@@ -432,74 +459,145 @@ st.markdown(
     }}
 
     .stApp {{
-      background: {BG};
+      background:
+        radial-gradient(circle at top left, rgba(208, 0, 127, 0.10), transparent 28%),
+        linear-gradient(180deg, #ffffff 0%, var(--bg) 52%, #f8eef4 100%);
     }}
 
     .block-container {{
-      padding-top: 1.1rem;
+      padding-top: 1.15rem;
+      padding-bottom: 3rem;
       max-width: 1320px;
     }}
 
-    h1, h2, h3, h4 {{
-      color: {TEXT};
+    [data-testid="stSidebar"] {{
+      background: linear-gradient(180deg, #ffffff 0%, #fbf1f7 100%);
+      border-right: 1px solid var(--border);
     }}
 
-    .stCaption, small, p {{
-      color: {MUTED};
+    h1, h2, h3, h4,
+    .stMarkdown h1,
+    .stMarkdown h2,
+    .stMarkdown h3,
+    label,
+    [data-testid="stMetricLabel"],
+    [data-testid="stMetricValue"] {{
+      font-family: var(--font-heading) !important;
+      color: var(--text);
+    }}
+
+    p, .stCaption, small {{
+      color: var(--muted);
     }}
 
     [data-testid="stHorizontalBlock"] {{
-      background: white;
-      border-radius: 16px;
-      padding: 0.55rem 0.8rem;
-      margin-bottom: 0.55rem;
-      box-shadow: 0 1px 12px rgba(0, 0, 0, 0.06);
+      background: rgba(255, 255, 255, 0.94);
+      border: 1px solid rgba(139, 13, 89, 0.10);
+      border-radius: 22px;
+      padding: 0.8rem 0.95rem;
+      margin-bottom: 0.65rem;
+      box-shadow: 0 16px 38px rgba(101, 11, 65, 0.08);
     }}
 
-    .stTextInput input, .stSelectbox div[data-baseweb="select"] > div {{
-      border-radius: 14px;
+    div[data-testid="stMetric"] {{
+      background: linear-gradient(180deg, #ffffff 0%, var(--primary-softest) 100%);
+      border: 1px solid var(--border);
+      border-radius: 22px;
+      padding: 0.9rem 1rem;
+      box-shadow: none;
     }}
 
-    .stButton > button, .stDownloadButton > button, .stLinkButton > a {{
-      border-radius: 14px !important;
-      padding: 0.85rem 1.05rem !important;
-      font-weight: 900 !important;
-      min-height: 52px !important;
+    div[data-testid="stMetricLabel"] {{
+      text-transform: uppercase;
+      letter-spacing: 0.10em;
+      color: var(--muted);
+      font-size: 0.74rem;
+    }}
+
+    div[data-testid="stMetricValue"] {{
+      color: var(--primary-dark);
+      letter-spacing: -0.02em;
+    }}
+
+    .stProgress > div > div {{
+      background-color: rgba(208, 0, 127, 0.12);
+    }}
+
+    .stProgress > div > div > div > div {{
+      background: linear-gradient(90deg, var(--primary-dark) 0%, var(--primary) 100%);
+    }}
+
+    .stTextInput input,
+    .stSelectbox div[data-baseweb="select"] > div,
+    .stFileUploader [data-testid="stFileUploaderDropzone"] {{
+      border-radius: 16px !important;
+      border: 1px solid var(--border) !important;
+      background: rgba(255, 255, 255, 0.94) !important;
+    }}
+
+    .stTextInput input:focus {{
+      border-color: var(--primary) !important;
+      box-shadow: 0 0 0 4px rgba(208, 0, 127, 0.12) !important;
+    }}
+
+    .stFileUploader [data-testid="stFileUploaderDropzone"] {{
+      border-style: dashed !important;
+      padding: 1rem 1.1rem;
+    }}
+
+    .stButton > button,
+    .stDownloadButton > button,
+    .stLinkButton > a {{
+      border-radius: 999px !important;
+      padding: 0.88rem 1.18rem !important;
+      font-weight: 800 !important;
+      min-height: 50px !important;
       white-space: nowrap !important;
+      letter-spacing: 0.01em;
+      transition: transform 140ms ease, box-shadow 140ms ease;
+    }}
+
+    .stButton > button:hover,
+    .stDownloadButton > button:hover,
+    .stLinkButton > a:hover {{
+      transform: translateY(-1px);
     }}
 
     .stButton > button:not([kind="secondary"]),
     .stDownloadButton > button:not([kind="secondary"]),
     .stLinkButton > a {{
-      background-color: {PRIMARY} !important;
+      background: linear-gradient(135deg, var(--primary-dark) 0%, var(--primary) 100%) !important;
       color: #ffffff !important;
       border: none !important;
+      box-shadow: 0 12px 24px rgba(208, 0, 127, 0.18) !important;
     }}
 
     .stButton > button[kind="secondary"] {{
-      background: #ffffff !important;
-      color: {PRIMARY} !important;
-      border: 2px solid {PRIMARY} !important;
+      background: rgba(255, 255, 255, 0.92) !important;
+      color: var(--primary-dark) !important;
+      border: 1px solid rgba(139, 13, 89, 0.24) !important;
     }}
 
     .badge-present {{
-      background: #DCFCE7;
-      color: #166534;
+      background: var(--primary-soft);
+      color: var(--primary-dark);
       padding: 7px 12px;
-      border-radius: 10px;
-      font-weight: 900;
+      border-radius: 999px;
+      font-weight: 800;
       display: inline-block;
       white-space: nowrap;
+      border: 1px solid rgba(139, 13, 89, 0.10);
     }}
 
     .badge-todo {{
-      background: #F3F4F6;
-      color: #374151;
+      background: #f3edf1;
+      color: var(--muted);
       padding: 7px 12px;
-      border-radius: 10px;
-      font-weight: 900;
+      border-radius: 999px;
+      font-weight: 800;
       display: inline-block;
       white-space: nowrap;
+      border: 1px solid rgba(113, 86, 107, 0.10);
     }}
 
     .cell-nowrap {{
@@ -509,11 +607,99 @@ st.markdown(
     }}
 
     .top-note {{
-      background: rgba(196, 0, 122, 0.06);
-      border: 1px solid rgba(196, 0, 122, 0.18);
-      border-radius: 18px;
-      padding: 0.9rem 1rem;
+      background: linear-gradient(135deg, rgba(208, 0, 127, 0.08) 0%, rgba(139, 13, 89, 0.04) 100%);
+      border: 1px solid rgba(208, 0, 127, 0.16);
+      border-radius: 22px;
+      padding: 1rem 1.1rem;
       margin-bottom: 1rem;
+    }}
+
+    .brand-hero {{
+      position: relative;
+      overflow: hidden;
+      background: linear-gradient(135deg, rgba(208, 0, 127, 0.08) 0%, rgba(139, 13, 89, 0.04) 56%, rgba(255, 255, 255, 0.98) 100%);
+      border: 1px solid rgba(208, 0, 127, 0.16);
+      border-radius: 28px;
+      padding: 1.3rem 1.35rem 1.2rem;
+      margin: 0.2rem 0 1rem;
+      box-shadow: 0 18px 44px rgba(101, 11, 65, 0.09);
+    }}
+
+    .brand-hero::after {{
+      content: "";
+      position: absolute;
+      top: -70px;
+      right: -24px;
+      width: 190px;
+      height: 190px;
+      background: radial-gradient(circle, rgba(208, 0, 127, 0.18) 0%, rgba(208, 0, 127, 0) 72%);
+      pointer-events: none;
+    }}
+
+    .brand-hero__eyebrow {{
+      margin: 0 0 0.45rem;
+      text-transform: uppercase;
+      letter-spacing: 0.14em;
+      font-size: 0.78rem;
+      font-weight: 800;
+      color: var(--primary-dark);
+    }}
+
+    .brand-hero__title {{
+      margin: 0;
+      font-family: var(--font-heading);
+      font-size: clamp(2rem, 3vw, 3rem);
+      line-height: 0.95;
+      letter-spacing: -0.03em;
+      color: var(--primary-dark);
+      font-weight: 700;
+    }}
+
+    .brand-hero__subtitle {{
+      margin: 0.55rem 0 0;
+      max-width: 760px;
+      color: var(--text);
+      font-size: 1.02rem;
+    }}
+
+    .brand-hero__signature {{
+      margin: 0.85rem 0 0;
+      text-transform: uppercase;
+      letter-spacing: 0.09em;
+      font-size: 0.88rem;
+      font-weight: 800;
+      color: var(--primary-dark);
+    }}
+
+    .brand-chip-row {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.58rem;
+      margin-top: 1rem;
+    }}
+
+    .brand-chip {{
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+      padding: 0.42rem 0.78rem;
+      border-radius: 999px;
+      border: 1px solid rgba(139, 13, 89, 0.14);
+      background: rgba(255, 255, 255, 0.88);
+      color: var(--primary-dark);
+      font-size: 0.82rem;
+      font-weight: 700;
+    }}
+
+    [data-testid="stDataFrameResizable"] {{
+      border-radius: 20px;
+      overflow: hidden;
+      border: 1px solid var(--border);
+    }}
+
+    [data-testid="stAlert"] {{
+      border-radius: 18px;
+      border: 1px solid rgba(139, 13, 89, 0.10);
     }}
     </style>
     """,
@@ -525,13 +711,13 @@ if "_run_count" not in st.session_state:
 st.session_state._run_count += 1
 
 logo_path = find_logo_path()
-logo_col, title_col = st.columns([1, 6])
+logo_col, title_col = st.columns([1.15, 6])
 with logo_col:
     if logo_path:
-        st.image(logo_path, width=90)
+        st.image(logo_path, width=112)
 with title_col:
     st.markdown(f"## {APP_TITLE}")
-    st.caption(APP_SUBTITLE)
+    st.caption("Institut Imagine")
 st.divider()
 
 with st.sidebar:
@@ -553,7 +739,7 @@ if uploaded is None:
     st.markdown(
         """
         <div class="top-note">
-          Charge un fichier participants pour demarrer.
+          Charge un fichier participants pour demarrer. Le style de l'application a ete aligne sur la charte Institut Imagine.
         </div>
         """,
         unsafe_allow_html=True,
@@ -623,6 +809,19 @@ if resume_warning:
 
 if not staff_name:
     st.warning("Saisis le nom de l'agent pour activer les boutons Emarger et Annuler.")
+
+st.markdown(
+    f"""
+    <section class="brand-hero">
+      <p class="brand-hero__eyebrow">Institut Imagine</p>
+      <h1 class="brand-hero__title">{APP_TITLE}</h1>
+      <p class="brand-hero__subtitle">{APP_SUBTITLE}</p>
+      <p class="brand-hero__signature">{APP_TAGLINE}</p>
+      <div class="brand-chip-row">{build_brand_chips(staff_name, event_code, uploaded.name, len(df))}</div>
+    </section>
+    """,
+    unsafe_allow_html=True,
+)
 
 total = len(df)
 present_count = int(df["present"].sum())
@@ -707,7 +906,7 @@ def pager(current_page_count: int, page_value: int, label: str) -> None:
             st.rerun()
     with info_col:
         st.markdown(
-            f"<div style='text-align:center; font-weight:800; padding:0.35rem 0;'>Page {page_value} / {current_page_count}</div>",
+            f"<div style='text-align:center; font-weight:800; padding:0.35rem 0; color:{PRIMARY_DARK};'>Page {page_value} / {current_page_count}</div>",
             unsafe_allow_html=True,
         )
     with next_col:
@@ -745,11 +944,11 @@ for _, row in view_page.iterrows():
     hour_display = checkin_time[-8:] if len(checkin_time) >= 8 else checkin_time
 
     row_cols = st.columns([2.2, 2.4, 3.3, 2.8, 1.8, 2.0, 2.1])
-    row_cols[0].markdown(f"<div class='cell-nowrap'>{row.get('first_name', '')}</div>", unsafe_allow_html=True)
-    row_cols[1].markdown(f"<div class='cell-nowrap'>{row.get('last_name', '')}</div>", unsafe_allow_html=True)
-    row_cols[2].markdown(f"<div class='cell-nowrap'>{row.get('email', '')}</div>", unsafe_allow_html=True)
-    row_cols[3].markdown(f"<div class='cell-nowrap'>{row.get('company', '')}</div>", unsafe_allow_html=True)
-    row_cols[4].markdown(f"<div class='cell-nowrap'>{hour_display}</div>", unsafe_allow_html=True)
+    row_cols[0].markdown(f"<div class='cell-nowrap'>{escape(str(row.get('first_name', '')))}</div>", unsafe_allow_html=True)
+    row_cols[1].markdown(f"<div class='cell-nowrap'>{escape(str(row.get('last_name', '')))}</div>", unsafe_allow_html=True)
+    row_cols[2].markdown(f"<div class='cell-nowrap'>{escape(str(row.get('email', '')))}</div>", unsafe_allow_html=True)
+    row_cols[3].markdown(f"<div class='cell-nowrap'>{escape(str(row.get('company', '')))}</div>", unsafe_allow_html=True)
+    row_cols[4].markdown(f"<div class='cell-nowrap'>{escape(hour_display)}</div>", unsafe_allow_html=True)
     row_cols[5].markdown(badge_html(is_present), unsafe_allow_html=True)
 
     row_index = st.session_state.id2i.get(row_id)
@@ -827,14 +1026,14 @@ with summary_right:
         chart_source["status"] = chart_source["status"].map({"present": "Presents", "absent": "Absents"})
         chart = (
             alt.Chart(chart_source)
-            .mark_bar()
+            .mark_bar(cornerRadiusTopRight=5, cornerRadiusBottomRight=5)
             .encode(
                 y=alt.Y("company_label:N", sort="-x", title="Societe"),
                 x=alt.X("count:Q", stack="zero", title="Participants"),
                 color=alt.Color(
                     "status:N",
                     title="Statut",
-                    scale=alt.Scale(domain=["Presents", "Absents"], range=["#16A34A", "#CBD5E1"]),
+                    scale=alt.Scale(domain=["Presents", "Absents"], range=[PRIMARY_DARK, "#E7D4E0"]),
                 ),
                 tooltip=[
                     alt.Tooltip("company_label:N", title="Societe"),
