@@ -739,7 +739,7 @@ if uploaded is None:
     st.markdown(
         """
         <div class="top-note">
-          Charge un fichier participants pour demarrer. Le style de l'application a ete aligne sur la charte Institut Imagine.
+          Charge un fichier participants pour demarrer
         </div>
         """,
         unsafe_allow_html=True,
